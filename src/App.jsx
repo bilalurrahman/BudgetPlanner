@@ -197,6 +197,17 @@ function RadialGauge({ pct, size = 168, thickness = 16, color = "#9dcbfc", label
   );
 }
 
+// Editorial section label: "01 — OVERVIEW" with a trailing hairline rule
+function Eyebrow({ index, children, accent = "text-primary" }) {
+  return (
+    <div className="flex items-center gap-3 mb-4">
+      <span className={`font-display text-xs font-bold tabular-nums ${accent}`}>{index}</span>
+      <span className="text-[11px] font-semibold uppercase tracking-[0.28em] text-on-surface-variant">{children}</span>
+      <span className="hairline flex-1" />
+    </div>
+  );
+}
+
 /* ─────────────────────────────── app ─────────────────────────────── */
 
 export default function BudgetApp() {
@@ -307,6 +318,20 @@ export default function BudgetApp() {
   }, [log]);
   const cashMax = Math.max(1, ...cashFlow.map(p => Math.abs(p.v)));
 
+  // Ticker-tape items — headline stats + recent transactions
+  const tickerItems = [
+    { k: "NET", v: fmt(netActual), tone: netActual >= 0 ? "pos" : "neg" },
+    { k: "INCOME", v: fmt(totalIncomeActual), tone: "pos" },
+    { k: "SPENT", v: fmt(totalExpActual), tone: "neg" },
+    { k: "SAVINGS RATE", v: `${savingsRate}%`, tone: "pos" },
+    { k: "STATUS", v: health.toUpperCase(), tone: netActual >= 0 ? "pos" : "neg" },
+    ...log.slice(0, 6).map(e => ({
+      k: (e.desc || "TXN").toUpperCase(),
+      v: `${e.type === "Income" ? "+" : "−"}${fmt(e.amount)}`,
+      tone: e.type === "Income" ? "pos" : "neg",
+    })),
+  ];
+
   const inputCls = "w-full bg-surface-container-lowest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary transition-all";
 
   return (
@@ -314,6 +339,8 @@ export default function BudgetApp() {
       {/* Ambient blobs */}
       <div className="fixed top-[-10%] right-[-5%] w-[500px] h-[500px] bg-primary/10 blur-[120px] rounded-full -z-10 pointer-events-none" />
       <div className="fixed bottom-[-10%] left-[-5%] w-[400px] h-[400px] bg-tertiary/10 blur-[100px] rounded-full -z-10 pointer-events-none" />
+      {/* Film grain */}
+      <div className="grain" />
 
       {/* Sidebar — desktop */}
       <aside className="hidden md:flex flex-col h-screen w-64 fixed left-0 top-0 z-[60] bg-slate-950/70 backdrop-blur-2xl shadow-[10px_0px_30px_rgba(0,0,0,0.5)] p-6">
@@ -365,34 +392,58 @@ export default function BudgetApp() {
           {/* ── DASHBOARD ── */}
           {tab === 0 && (
             <div className="space-y-6 md:space-y-8">
-              {/* Hero with live aurora + savings gauge */}
-              <section className="relative rounded-2xl overflow-hidden ring-1 ring-white/5">
+              {/* Ticker tape */}
+              <div className="marquee reveal -mx-4 md:-mx-8 -mt-2 md:mt-0 overflow-hidden border-y border-white/5 bg-slate-950/40 backdrop-blur-sm py-2.5">
+                <div className="marquee-track">
+                  {[...tickerItems, ...tickerItems].map((t, i) => (
+                    <span key={i} className="inline-flex items-center gap-2 px-6 text-[11px] uppercase tracking-[0.2em]">
+                      <span className="text-on-surface-variant/60">{t.k}</span>
+                      <span className={`font-display font-semibold tabular-nums ${t.tone === "pos" ? "text-primary" : "text-error"}`}>{t.v}</span>
+                      <span className="text-outline-variant/40">/</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Hero — editorial, oversized */}
+              <section className="reveal relative rounded-[1.5rem] overflow-hidden ring-1 ring-white/5">
                 <div className="absolute inset-0 bg-gradient-to-br from-surface-container-low via-surface-container-highest to-surface" />
                 <div className="aurora absolute -top-24 -right-10 w-[420px] h-[420px] rounded-full blur-[90px] opacity-60" />
                 <div className="aurora-2 absolute -bottom-24 -left-10 w-[360px] h-[360px] rounded-full blur-[90px] opacity-50" />
-                <div className="relative z-10 grid grid-cols-1 lg:grid-cols-[1.4fr_1fr] gap-8 p-7 md:p-10 items-center">
+                {/* Oversized backdrop month name */}
+                <div className="ghost-type absolute -bottom-8 -right-4 text-[28vw] md:text-[14rem] select-none pointer-events-none z-0 uppercase">
+                  {MONTHS[month]}
+                </div>
+                <div className="relative z-10 grid grid-cols-1 lg:grid-cols-[1.5fr_1fr] gap-8 p-7 md:p-12 items-center">
                   <div>
-                    <span className="text-xs uppercase tracking-[0.2em] text-on-surface-variant font-semibold">Net Savings · {MONTH_NAMES[month]}</span>
-                    <h2 className={`font-headline text-5xl md:text-7xl font-extrabold mt-3 text-glow tabular-nums ${netActual >= 0 ? "text-on-surface" : "text-error"}`}>
+                    <div className="flex items-center gap-3 mb-5">
+                      <span className="font-display text-xs font-bold text-primary tabular-nums">00</span>
+                      <span className="text-[11px] font-semibold uppercase tracking-[0.28em] text-on-surface-variant">Net Position</span>
+                    </div>
+                    <h2 className="font-serif italic text-2xl md:text-3xl text-on-surface-variant/90 leading-none">
+                      You've kept
+                    </h2>
+                    <h2 className={`font-display font-bold text-6xl md:text-8xl mt-1 tracking-tight tabular-nums text-glow leading-[0.9] ${netActual >= 0 ? "text-on-surface" : "text-error"}`}>
                       {fmt(netAnim)}
                     </h2>
-                    <div className={`mt-3 inline-flex items-center gap-2 text-sm font-medium px-3 py-1.5 rounded-full ${netActual >= 0 ? "bg-primary/10 text-primary" : "bg-error/10 text-error"}`}>
+                    <h2 className="font-serif italic text-2xl md:text-3xl text-on-surface-variant/90 mt-1 leading-none">
+                      this <span className="text-primary">{MONTH_NAMES[month]}</span>.
+                    </h2>
+                    <div className={`mt-6 inline-flex items-center gap-2 text-sm font-medium px-3.5 py-1.5 rounded-full ${netActual >= 0 ? "bg-primary/10 text-primary" : "bg-error/10 text-error"}`}>
                       <span className="material-symbols-outlined text-base">{netActual >= 0 ? "trending_up" : "trending_down"}</span>
                       <span>{savingsRate}% savings rate · <span className={healthColorCls}>{health}</span></span>
                     </div>
-                    <div className="mt-7 flex gap-3 flex-wrap">
-                      <div className="glass-card px-5 py-3 rounded-xl ring-1 ring-outline-variant/20">
-                        <span className="text-xs text-on-surface-variant block mb-1">Income</span>
-                        <span className="font-headline text-lg font-bold text-primary tabular-nums">{fmt(totalIncomeActual)}</span>
-                      </div>
-                      <div className="glass-card px-5 py-3 rounded-xl ring-1 ring-outline-variant/20">
-                        <span className="text-xs text-on-surface-variant block mb-1">Expenses</span>
-                        <span className="font-headline text-lg font-bold text-error tabular-nums">{fmt(totalExpActual)}</span>
-                      </div>
-                      <div className="glass-card px-5 py-3 rounded-xl ring-1 ring-outline-variant/20">
-                        <span className="text-xs text-on-surface-variant block mb-1">Planned Net</span>
-                        <span className={`font-headline text-lg font-bold tabular-nums ${netBudget >= 0 ? "text-on-surface" : "text-error"}`}>{fmt(netBudget)}</span>
-                      </div>
+                    <div className="mt-8 grid grid-cols-3 gap-px bg-white/5 rounded-xl overflow-hidden ring-1 ring-white/5">
+                      {[
+                        { l: "Income", v: fmt(totalIncomeActual), c: "text-primary" },
+                        { l: "Expenses", v: fmt(totalExpActual), c: "text-error" },
+                        { l: "Planned Net", v: fmt(netBudget), c: netBudget >= 0 ? "text-on-surface" : "text-error" },
+                      ].map(s => (
+                        <div key={s.l} className="bg-slate-950/40 backdrop-blur-sm px-4 py-3">
+                          <span className="text-[10px] text-on-surface-variant uppercase tracking-wider block mb-1">{s.l}</span>
+                          <span className={`font-display text-base md:text-lg font-semibold tabular-nums ${s.c}`}>{s.v}</span>
+                        </div>
+                      ))}
                     </div>
                   </div>
                   <div className="flex flex-col items-center">
@@ -400,15 +451,17 @@ export default function BudgetApp() {
                       color={gaugeColor}
                       value={`${netActual >= 0 ? savingsRate : budgetUsed}%`}
                       label={netActual >= 0 ? "saved" : "of income"} />
-                    <p className="text-xs text-on-surface-variant mt-2 text-center">
-                      {budgetUsed}% of income spent
+                    <p className="text-xs text-on-surface-variant mt-2 text-center font-display tracking-wide">
+                      {budgetUsed}% OF INCOME SPENT
                     </p>
                   </div>
                 </div>
               </section>
 
               {/* KPI bento */}
-              <section className="grid grid-cols-1 md:grid-cols-3 gap-5 md:gap-6">
+              <section className="reveal" style={{ animationDelay: "0.05s" }}>
+                <Eyebrow index="01" accent="text-primary">The Pulse</Eyebrow>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-5 md:gap-6">
                 {[
                   { label: "Total Income", icon: "payments", color: "text-primary", anim: incomeAnim,
                     barCls: "bg-gradient-to-r from-primary to-primary-container glow-bar",
@@ -426,7 +479,7 @@ export default function BudgetApp() {
                     </div>
                     <span className="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">{k.label}</span>
                     <div className="mt-4 flex items-baseline gap-2">
-                      <span className={`text-3xl font-bold font-headline tabular-nums ${k.neg ? "text-error" : ""}`}>{fmt(k.anim)}</span>
+                      <span className={`text-3xl md:text-4xl font-bold font-display tracking-tight tabular-nums ${k.neg ? "text-error" : ""}`}>{fmt(k.anim)}</span>
                       <span className={`text-xs ${k.color}`}>{k.sub}</span>
                     </div>
                     <div className="mt-6 h-1.5 w-full bg-surface-container-highest rounded-full overflow-hidden">
@@ -434,10 +487,13 @@ export default function BudgetApp() {
                     </div>
                   </div>
                 ))}
+                </div>
               </section>
 
               {/* Donut allocation + Spending bars */}
-              <section className="grid grid-cols-1 lg:grid-cols-5 gap-6 md:gap-8">
+              <section className="reveal" style={{ animationDelay: "0.1s" }}>
+                <Eyebrow index="02" accent="text-tertiary">Allocation</Eyebrow>
+                <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 md:gap-8">
                 {/* Donut */}
                 <div className="lg:col-span-2 bg-surface-container-lowest p-6 md:p-7 rounded-2xl ring-1 ring-outline-variant/10">
                   <h2 className="font-headline text-lg font-bold mb-1">Expense Allocation</h2>
@@ -486,10 +542,13 @@ export default function BudgetApp() {
                     })}
                   </div>
                 </div>
+                </div>
               </section>
 
               {/* Cash flow + 50/30/20 */}
-              <section className="grid grid-cols-1 lg:grid-cols-5 gap-6 md:gap-8">
+              <section className="reveal" style={{ animationDelay: "0.15s" }}>
+                <Eyebrow index="03" accent="text-emerald-400">Flow & Rule</Eyebrow>
+                <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 md:gap-8">
                 {/* Cash flow */}
                 <div className="lg:col-span-3 bg-surface-container-lowest p-6 md:p-8 rounded-2xl ring-1 ring-outline-variant/10">
                   <div className="flex items-center justify-between mb-6">
@@ -556,6 +615,7 @@ export default function BudgetApp() {
                       );
                     })}
                   </div>
+                </div>
                 </div>
               </section>
             </div>

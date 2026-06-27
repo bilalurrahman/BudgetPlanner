@@ -55,6 +55,8 @@ export default {
       },
       fontFamily: {
         headline: ['Manrope', 'sans-serif'],
+        display:  ['Space Grotesk', 'sans-serif'],
+        serif:    ['Instrument Serif', 'serif'],
         body:     ['Inter', 'sans-serif'],
         label:    ['Inter', 'sans-serif'],
       },

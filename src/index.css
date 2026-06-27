@@ -30,4 +30,57 @@
   .text-glow {
     text-shadow: 0 0 15px rgba(157, 203, 252, 0.5);
   }
+
+  /* Film-grain overlay — instant editorial texture */
+  .grain {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    opacity: 0.05;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  /* Hairline rule used beside editorial section labels */
+  .hairline {
+    height: 1px;
+    background: linear-gradient(90deg, rgba(157,203,252,0.4), transparent);
+  }
+}
+
+/* Staggered entrance reveal */
+@keyframes reveal {
+  from { opacity: 0; transform: translateY(22px); filter: blur(6px); }
+  to   { opacity: 1; transform: none; filter: none; }
+}
+.reveal { animation: reveal 0.8s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+/* Ticker tape */
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+.marquee-track {
+  display: inline-flex;
+  white-space: nowrap;
+  animation: marquee 32s linear infinite;
+}
+.marquee:hover .marquee-track { animation-play-state: paused; }
+
+/* Oversized editorial backdrop numeral */
+.ghost-type {
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 700;
+  line-height: 0.8;
+  letter-spacing: -0.04em;
+  color: transparent;
+  -webkit-text-stroke: 1px rgba(157, 203, 252, 0.10);
+}
+
+::selection { background: rgba(213, 187, 253, 0.3); color: #fff; }
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal { animation: none; }
+  .marquee-track { animation: none; }
 }
