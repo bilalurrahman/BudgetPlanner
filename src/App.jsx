@@ -19,6 +19,10 @@ const EXPENSE_SECTIONS = {
   "💰 Savings":       ["Emergency Fund","Investments","BNPL Reserve"],
 };
 
+// item name → its section key (for transaction-feed icons)
+const EXPENSE_SECTIONS_LOOKUP = {};
+Object.entries(EXPENSE_SECTIONS).forEach(([sec, items]) => items.forEach(i => { EXPENSE_SECTIONS_LOOKUP[i] = sec; }));
+
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const now = new Date();
@@ -197,6 +201,26 @@ function RadialGauge({ pct, size = 168, thickness = 16, color = "#9dcbfc", label
   );
 }
 
+// Budgetum-style circular category dial — emoji center, ring fills to % of budget
+function RingDial({ pct, color, over, emoji, size = 80, thickness = 7 }) {
+  const r = (size - thickness) / 2;
+  const c = 2 * Math.PI * r;
+  const clamped = Math.max(0, Math.min(100, pct));
+  const dash = (clamped / 100) * c;
+  const stroke = over ? "#ffb4ab" : color;
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto">
+      <g transform={`rotate(-90 ${size / 2} ${size / 2})`}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#1b2530" strokeWidth={thickness} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={stroke} strokeWidth={thickness}
+          strokeLinecap="round" strokeDasharray={`${dash} ${c - dash}`}
+          style={{ transition: "stroke-dasharray .8s ease", filter: `drop-shadow(0 0 4px ${stroke}99)` }} />
+      </g>
+      <text x="50%" y="50%" textAnchor="middle" dominantBaseline="central" style={{ fontSize: size * 0.34 }}>{emoji}</text>
+    </svg>
+  );
+}
+
 // Editorial section label: "01 — OVERVIEW" with a trailing hairline rule
 function Eyebrow({ index, children, accent = "text-primary" }) {
   return (
@@ -331,6 +355,22 @@ export default function BudgetApp() {
       tone: e.type === "Income" ? "pos" : "neg",
     })),
   ];
+
+  // Group the log by day (newest first) with per-day subtotals — Budgetum "Track Expenses" style
+  const logByDay = useMemo(() => {
+    const g = {};
+    log.forEach(e => { (g[e.date] || (g[e.date] = [])).push(e); });
+    return Object.keys(g).sort((a, b) => b.localeCompare(a)).map(date => {
+      const entries = g[date];
+      const inc = entries.reduce((s, e) => e.type === "Income" ? s + e.amount : s, 0);
+      const exp = entries.reduce((s, e) => e.type === "Expense" ? s + e.amount : s, 0);
+      let label = date;
+      try {
+        label = new Date(date + "T00:00:00").toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+      } catch {}
+      return { date, label, entries, inc, exp, net: inc - exp };
+    });
+  }, [log]);
 
   const inputCls = "w-full bg-surface-container-lowest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary transition-all";
 
@@ -623,20 +663,21 @@ export default function BudgetApp() {
 
           {/* ── INCOME ── */}
           {tab === 1 && (
-            <div className="space-y-6">
+            <div className="space-y-6 reveal">
+              <Eyebrow index="◇" accent="text-primary">Income · {MONTH_NAMES[month]}</Eyebrow>
               <div className="flex flex-col md:flex-row md:justify-between md:items-end gap-4">
                 <div>
-                  <span className="text-tertiary font-medium tracking-widest text-xs uppercase opacity-80">Monthly Overview</span>
-                  <h2 className="text-3xl md:text-4xl font-extrabold font-headline mt-1">Income & <span className="text-primary">Budget</span></h2>
+                  <h2 className="font-serif italic text-2xl text-on-surface-variant/90 leading-none">Everything that</h2>
+                  <h2 className="text-4xl md:text-5xl font-bold font-display tracking-tight mt-1">came <span className="text-primary">in</span>.</h2>
                 </div>
-                <div className="flex gap-3">
-                  <div className="glass-card px-5 py-3 rounded-xl border border-outline-variant/10">
-                    <p className="text-on-surface-variant text-xs mb-0.5">Budgeted</p>
-                    <p className="text-xl font-bold font-headline tabular-nums">{fmt(totalIncomeBudget)}</p>
+                <div className="flex gap-px bg-white/5 rounded-xl overflow-hidden ring-1 ring-white/5">
+                  <div className="bg-slate-950/40 px-5 py-3">
+                    <p className="text-on-surface-variant text-[10px] uppercase tracking-wider mb-0.5">Budgeted</p>
+                    <p className="text-xl font-semibold font-display tabular-nums">{fmt(totalIncomeBudget)}</p>
                   </div>
-                  <div className="glass-card px-5 py-3 rounded-xl border border-outline-variant/10 bg-primary/5">
-                    <p className="text-primary text-xs mb-0.5">Actual</p>
-                    <p className="text-xl font-bold font-headline text-primary tabular-nums">{fmt(totalIncomeActual)}</p>
+                  <div className="bg-slate-950/40 px-5 py-3">
+                    <p className="text-primary text-[10px] uppercase tracking-wider mb-0.5">Actual</p>
+                    <p className="text-xl font-semibold font-display text-primary tabular-nums">{fmt(totalIncomeActual)}</p>
                   </div>
                 </div>
               </div>
@@ -702,23 +743,52 @@ export default function BudgetApp() {
 
           {/* ── EXPENSES ── */}
           {tab === 2 && (
-            <div className="space-y-6">
-              <div className="flex flex-col md:flex-row md:justify-between md:items-end gap-4">
-                <div>
-                  <span className="text-tertiary font-medium tracking-widest text-xs uppercase opacity-80">Monthly Overview</span>
-                  <h2 className="text-3xl md:text-4xl font-extrabold font-headline mt-1">Expenses & <span className="text-error">Spend</span></h2>
-                </div>
-                <div className="flex gap-3">
-                  <div className="glass-card px-5 py-3 rounded-xl border border-outline-variant/10">
-                    <p className="text-on-surface-variant text-xs mb-0.5">Budgeted</p>
-                    <p className="text-xl font-bold font-headline tabular-nums">{fmt(totalExpBudget)}</p>
+            <div className="space-y-6 md:space-y-8">
+              <div className="reveal">
+                <Eyebrow index="◇" accent="text-error">Expenses · {MONTH_NAMES[month]}</Eyebrow>
+                <div className="flex flex-col md:flex-row md:justify-between md:items-end gap-4">
+                  <div>
+                    <h2 className="font-serif italic text-2xl text-on-surface-variant/90 leading-none">Everything that</h2>
+                    <h2 className="text-4xl md:text-5xl font-bold font-display tracking-tight mt-1">went <span className="text-error">out</span>.</h2>
                   </div>
-                  <div className="glass-card px-5 py-3 rounded-xl border border-error/20 bg-error/5">
-                    <p className="text-error text-xs mb-0.5">Actual Spent</p>
-                    <p className="text-xl font-bold font-headline text-error tabular-nums">{fmt(totalExpActual)}</p>
+                  <div className="flex gap-px bg-white/5 rounded-xl overflow-hidden ring-1 ring-white/5">
+                    <div className="bg-slate-950/40 px-5 py-3">
+                      <p className="text-on-surface-variant text-[10px] uppercase tracking-wider mb-0.5">Budgeted</p>
+                      <p className="text-xl font-semibold font-display tabular-nums">{fmt(totalExpBudget)}</p>
+                    </div>
+                    <div className="bg-slate-950/40 px-5 py-3">
+                      <p className="text-error text-[10px] uppercase tracking-wider mb-0.5">Spent</p>
+                      <p className="text-xl font-semibold font-display text-error tabular-nums">{fmt(totalExpActual)}</p>
+                    </div>
                   </div>
                 </div>
               </div>
+
+              {/* Category dials */}
+              <section className="reveal" style={{ animationDelay: "0.05s" }}>
+                <Eyebrow index="01" accent="text-primary">Category Dials</Eyebrow>
+                <div className="bg-surface-container-lowest rounded-2xl ring-1 ring-outline-variant/10 p-6 md:p-8">
+                  <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-4 md:gap-3">
+                    {Object.entries(EXPENSE_SECTIONS).map(([sec]) => {
+                      const { budgeted, actual } = sectionTotals[sec];
+                      const p = pct(actual, budgeted);
+                      const over = actual > budgeted && budgeted > 0;
+                      return (
+                        <div key={sec} className="flex flex-col items-center text-center">
+                          <div className="w-16 md:w-[68px] hover:scale-105 transition-transform">
+                            <RingDial pct={p} color={SECTION_COLORS[sec]} over={over} emoji={sec.split(" ")[0]} />
+                          </div>
+                          <span className="text-[10px] text-on-surface-variant mt-2 truncate w-full">{sec.replace(/^\S+\s/, "")}</span>
+                          <span className="text-[11px] font-display font-semibold tabular-nums" style={{ color: over ? "#ffb4ab" : SECTION_COLORS[sec] }}>{fmtCompact(actual)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </section>
+
+              <section className="reveal" style={{ animationDelay: "0.1s" }}>
+                <Eyebrow index="02" accent="text-tertiary">Detailed Budgets</Eyebrow>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                 {Object.entries(EXPENSE_SECTIONS).map(([sec, items]) => {
                   const { budgeted, actual } = sectionTotals[sec];
@@ -733,7 +803,7 @@ export default function BudgetApp() {
                         {over && <span className="px-2 py-0.5 rounded-md bg-error text-on-error text-[10px] font-bold uppercase tracking-wider">Over Budget</span>}
                       </div>
                       <div>
-                        <h3 className="text-lg font-bold font-headline mb-1">{sec.replace(/^\S+\s/, "")}</h3>
+                        <h3 className="text-lg font-bold font-display tracking-tight mb-1">{sec.replace(/^\S+\s/, "")}</h3>
                         <div className={`flex justify-between text-xs mb-3 ${over ? "text-error font-semibold" : "text-on-surface-variant"}`}>
                           <span>Spent: {fmt(actual)}</span>
                           <span>Budget: {fmt(budgeted)}</span>
@@ -758,15 +828,17 @@ export default function BudgetApp() {
                   );
                 })}
               </div>
+              </section>
             </div>
           )}
 
           {/* ── LOG ── */}
           {tab === 3 && (
-            <div className="space-y-6">
+            <div className="space-y-6 reveal">
               <div>
-                <span className="text-tertiary font-medium tracking-widest text-xs uppercase opacity-80">Activity</span>
-                <h2 className="text-3xl md:text-4xl font-extrabold font-headline mt-1">Transaction <span className="text-tertiary">Log</span></h2>
+                <Eyebrow index="◇" accent="text-tertiary">Activity</Eyebrow>
+                <h2 className="font-serif italic text-2xl text-on-surface-variant/90 leading-none">Your money,</h2>
+                <h2 className="text-4xl md:text-5xl font-bold font-display tracking-tight mt-1">in <span className="text-tertiary">motion</span>.</h2>
               </div>
               {/* Form */}
               <div className="glass-card rounded-xl p-6 border border-outline-variant/10">
@@ -819,42 +891,54 @@ export default function BudgetApp() {
                   </button>
                 </div>
               </div>
-              {/* List */}
-              <div className="bg-surface-container-low rounded-xl overflow-hidden ring-1 ring-outline-variant/5">
-                <div className="px-6 py-4 border-b border-outline-variant/10 flex justify-between items-center">
-                  <h3 className="font-headline font-bold text-lg">Recent Flux</h3>
-                  <span className="text-xs text-on-surface-variant tabular-nums">{log.length} transactions · {fmt(log.reduce((s, e) => e.type === "Expense" ? s + e.amount : s, 0))} expenses</span>
-                </div>
+              {/* Day-grouped feed */}
+              <div>
+                <Eyebrow index="01" accent="text-primary">Recent Flux</Eyebrow>
                 {log.length === 0 ? (
-                  <div className="py-16 text-center">
+                  <div className="bg-surface-container-low rounded-2xl ring-1 ring-outline-variant/5 py-16 text-center">
                     <span className="material-symbols-outlined text-5xl text-on-surface-variant/30 block mb-3">receipt_long</span>
                     <p className="text-on-surface-variant text-sm">No transactions yet. Add your first one above.</p>
                   </div>
                 ) : (
-                  <div className="divide-y divide-outline-variant/5">
-                    {log.map(entry => (
-                      <div key={entry.id}
-                        className={`flex items-center justify-between p-4 md:p-5 hover:bg-surface-container-high transition-colors ${pulse === entry.id ? "animate-[fadeIn_0.4s_ease]" : ""}`}
-                        style={{ borderLeft: `3px solid ${entry.type === "Income" ? "#9dcbfc" : "#ffb4ab"}` }}>
-                        <div className="flex items-center gap-4">
-                          <div className="w-10 h-10 rounded-full bg-surface-container-highest flex items-center justify-center flex-shrink-0">
-                            <span className={`material-symbols-outlined text-base ${entry.type === "Income" ? "text-primary" : "text-error"}`}>
-                              {entry.type === "Income" ? "payments" : "shopping_bag"}
-                            </span>
-                          </div>
-                          <div>
-                            <p className="font-semibold text-sm">{entry.desc}</p>
-                            <p className="text-xs text-on-surface-variant">{entry.date} · {entry.cat || "Uncategorized"}</p>
+                  <div className="space-y-5">
+                    {logByDay.map(day => (
+                      <div key={day.date}>
+                        {/* Day header */}
+                        <div className="flex items-center justify-between mb-2 px-1">
+                          <span className="text-xs font-semibold uppercase tracking-[0.18em] text-on-surface-variant">{day.label}</span>
+                          <div className="flex items-center gap-3 text-[11px] tabular-nums">
+                            {day.inc > 0 && <span className="text-primary">+{fmt(day.inc)}</span>}
+                            {day.exp > 0 && <span className="text-error">−{fmt(day.exp)}</span>}
+                            <span className={`font-display font-semibold ${day.net >= 0 ? "text-on-surface" : "text-error"}`}>{day.net >= 0 ? "+" : "−"}{fmt(Math.abs(day.net))}</span>
                           </div>
                         </div>
-                        <div className="flex items-center gap-3">
-                          <span className={`font-bold font-headline tabular-nums ${entry.type === "Income" ? "text-primary" : "text-error"}`}>
-                            {entry.type === "Income" ? "+" : "-"}{fmt(entry.amount)}
-                          </span>
-                          <button onClick={() => deleteLog(entry.id)}
-                            className="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-error/10 hover:text-error transition-all">
-                            <span className="material-symbols-outlined text-base">delete</span>
-                          </button>
+                        {/* Entries */}
+                        <div className="bg-surface-container-low rounded-2xl ring-1 ring-outline-variant/5 overflow-hidden divide-y divide-outline-variant/5">
+                          {day.entries.map(entry => (
+                            <div key={entry.id}
+                              className={`flex items-center justify-between p-4 hover:bg-surface-container-high transition-colors ${pulse === entry.id ? "animate-[fadeIn_0.4s_ease]" : ""}`}
+                              style={{ borderLeft: `3px solid ${entry.type === "Income" ? "#9dcbfc" : "#ffb4ab"}` }}>
+                              <div className="flex items-center gap-3.5">
+                                <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 text-lg"
+                                  style={{ background: entry.type === "Income" ? "rgba(157,203,252,0.12)" : `${(SECTION_COLORS[EXPENSE_SECTIONS_LOOKUP[entry.cat]] || "#ffb4ab")}22` }}>
+                                  {entry.type === "Income" ? "💸" : (EXPENSE_SECTIONS_LOOKUP[entry.cat] || "🛒").split(" ")[0]}
+                                </div>
+                                <div>
+                                  <p className="font-semibold text-sm">{entry.desc}</p>
+                                  <p className="text-xs text-on-surface-variant">{entry.cat || "Uncategorized"}</p>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-3">
+                                <span className={`font-semibold font-display tabular-nums ${entry.type === "Income" ? "text-primary" : "text-error"}`}>
+                                  {entry.type === "Income" ? "+" : "−"}{fmt(entry.amount)}
+                                </span>
+                                <button onClick={() => deleteLog(entry.id)}
+                                  className="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-error/10 hover:text-error transition-all">
+                                  <span className="material-symbols-outlined text-base">delete</span>
+                                </button>
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       </div>
                     ))}
