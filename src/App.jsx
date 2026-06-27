@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 
 const CURRENCY = "﷼";
 
@@ -35,6 +35,27 @@ const SECTION_ICONS = {
   "💰 Savings": "savings",
 };
 
+// Distinct hues for the donut / category visuals
+const SECTION_COLORS = {
+  "🏠 Housing":       "#9dcbfc",
+  "🚗 Transport":     "#d5bbfd",
+  "🛒 Food":          "#7ee0c0",
+  "💊 Health":        "#ffb4ab",
+  "📱 Subscriptions": "#ffd479",
+  "👨‍👩‍👧 Family":        "#f5a3c7",
+  "🎯 Personal":      "#a3cbef",
+  "🎓 Education":     "#b39ddb",
+  "💰 Savings":       "#8be9a8",
+};
+
+// 50 / 30 / 20 mapping
+const RULE_BUCKET = {
+  "🏠 Housing": "needs", "🚗 Transport": "needs", "🛒 Food": "needs",
+  "💊 Health": "needs", "👨‍👩‍👧 Family": "needs",
+  "📱 Subscriptions": "wants", "🎯 Personal": "wants", "🎓 Education": "wants",
+  "💰 Savings": "savings",
+};
+
 const INCOME_ICONS = {
   "Primary Salary": "work",
   "Freelance / Side": "laptop",
@@ -53,7 +74,12 @@ const NAV_ITEMS = [
 
 function fmt(n) {
   if (!n && n !== 0) return `${CURRENCY}0`;
-  return `${CURRENCY}${Number(n).toLocaleString("en-SA", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  return `${CURRENCY}${Math.round(Number(n)).toLocaleString("en-SA")}`;
+}
+function fmtCompact(n) {
+  const v = Math.round(Number(n) || 0);
+  if (Math.abs(v) >= 1000) return `${CURRENCY}${(v / 1000).toFixed(1)}k`;
+  return `${CURRENCY}${v}`;
 }
 
 function buildInitial() {
@@ -63,83 +89,223 @@ function buildInitial() {
   Object.entries(EXPENSE_SECTIONS).forEach(([sec, items]) => {
     items.forEach(item => { expenses[item] = { budgeted: 0, actual: 0, section: sec }; });
   });
-  return { income, expenses };
+  return { income, expenses, log: [] };
 }
 
-const STORAGE_KEY = "rabt_budget_v1";
+const STORAGE_KEY = "rabt_budget_v2";
+const LEGACY_KEY = "rabt_budget_v1";
+const monthKey = (year, m) => `${year}-${String(m + 1).padStart(2, "0")}`;
 
-function loadData() {
+function loadStore() {
   try {
     const raw = window.localStorage?.getItem?.(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
+    // One-time migration from the old single-bucket format
+    const legacy = window.localStorage?.getItem?.(LEGACY_KEY);
+    if (legacy) {
+      const o = JSON.parse(legacy);
+      const k = monthKey(now.getFullYear(), now.getMonth());
+      return { [k]: { income: o.income, expenses: o.expenses, log: o.log || [] } };
+    }
   } catch {}
-  return null;
+  return {};
+}
+function saveStore(store) {
+  try { window.localStorage?.setItem?.(STORAGE_KEY, JSON.stringify(store)); } catch {}
 }
 
-function saveData(data) {
-  try { window.localStorage?.setItem?.(STORAGE_KEY, JSON.stringify(data)); } catch {}
+/* ─────────────────────────── small viz helpers ─────────────────────────── */
+
+// Eased count-up that animates whenever the target value changes
+function useCountUp(value, duration = 900) {
+  const [display, setDisplay] = useState(value);
+  const fromRef = useRef(value);
+  useEffect(() => {
+    const start = fromRef.current;
+    const end = Number(value) || 0;
+    if (start === end) return;
+    const t0 = performance.now();
+    let raf;
+    const tick = (t) => {
+      const p = Math.min(1, (t - t0) / duration);
+      const e = 1 - Math.pow(1 - p, 3);
+      const cur = start + (end - start) * e;
+      setDisplay(cur);
+      if (p < 1) raf = requestAnimationFrame(tick);
+      else fromRef.current = end;
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [value, duration]);
+  return display;
 }
+
+function DonutChart({ segments, size = 200, thickness = 26, center, sub }) {
+  const total = segments.reduce((s, x) => s + x.value, 0);
+  const r = (size - thickness) / 2;
+  const c = 2 * Math.PI * r;
+  let acc = 0;
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto max-w-[210px] mx-auto">
+      <g transform={`rotate(-90 ${size / 2} ${size / 2})`}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#17202b" strokeWidth={thickness} />
+        {total > 0 && segments.map((s, i) => {
+          const dash = (s.value / total) * c;
+          const el = (
+            <circle key={i} cx={size / 2} cy={size / 2} r={r} fill="none"
+              stroke={s.color} strokeWidth={thickness}
+              strokeDasharray={`${dash} ${c - dash}`} strokeDashoffset={-acc}
+              style={{ transition: "stroke-dasharray .9s ease, stroke-dashoffset .9s ease" }} />
+          );
+          acc += dash;
+          return el;
+        })}
+      </g>
+      <text x="50%" y="46%" textAnchor="middle" className="fill-on-surface font-headline"
+        style={{ fontSize: size * 0.13, fontWeight: 800 }}>{center}</text>
+      <text x="50%" y="60%" textAnchor="middle" className="fill-on-surface-variant"
+        style={{ fontSize: size * 0.055, letterSpacing: 1.5, textTransform: "uppercase" }}>{sub}</text>
+    </svg>
+  );
+}
+
+function RadialGauge({ pct, size = 168, thickness = 16, color = "#9dcbfc", label, value }) {
+  const clamped = Math.max(0, Math.min(100, pct));
+  const r = (size - thickness) / 2;
+  const c = 2 * Math.PI * r;
+  const dash = (clamped / 100) * c;
+  const id = useRef(`g${Math.random().toString(36).slice(2)}`).current;
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto max-w-[180px] mx-auto">
+      <defs>
+        <linearGradient id={id} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.5" />
+          <stop offset="100%" stopColor={color} />
+        </linearGradient>
+      </defs>
+      <g transform={`rotate(-90 ${size / 2} ${size / 2})`}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#17202b" strokeWidth={thickness} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={`url(#${id})`} strokeWidth={thickness}
+          strokeLinecap="round" strokeDasharray={`${dash} ${c - dash}`}
+          style={{ transition: "stroke-dasharray .9s ease", filter: `drop-shadow(0 0 6px ${color}88)` }} />
+      </g>
+      <text x="50%" y="47%" textAnchor="middle" className="fill-on-surface font-headline"
+        style={{ fontSize: size * 0.2, fontWeight: 800 }}>{value}</text>
+      <text x="50%" y="62%" textAnchor="middle" className="fill-on-surface-variant"
+        style={{ fontSize: size * 0.07, letterSpacing: 1, textTransform: "uppercase" }}>{label}</text>
+    </svg>
+  );
+}
+
+/* ─────────────────────────────── app ─────────────────────────────── */
 
 export default function BudgetApp() {
-  const initial = buildInitial();
-  const saved = loadData();
   const [tab, setTab] = useState(0);
   const [month, setMonth] = useState(now.getMonth());
-  const [income, setIncome] = useState(saved?.income || initial.income);
-  const [expenses, setExpenses] = useState(saved?.expenses || initial.expenses);
-  const [log, setLog] = useState(saved?.log || []);
-  const [logForm, setLogForm] = useState({ date: new Date().toISOString().slice(0,10), desc: "", amount: "", type: "Expense", cat: "" });
+  const [store, setStore] = useState(loadStore);
+  const [logForm, setLogForm] = useState({ date: new Date().toISOString().slice(0, 10), desc: "", amount: "", type: "Expense", cat: "" });
   const [pulse, setPulse] = useState(null);
 
-  useEffect(() => { saveData({ income, expenses, log }); }, [income, expenses, log]);
+  const year = now.getFullYear();
+  const key = monthKey(year, month);
 
-  const totalIncomeBudget = Object.values(income).reduce((s,v) => s + (Number(v.budgeted)||0), 0);
-  const totalIncomeActual = Object.values(income).reduce((s,v) => s + (Number(v.actual)||0), 0);
-  const totalExpBudget    = Object.values(expenses).reduce((s,v) => s + (Number(v.budgeted)||0), 0);
-  const totalExpActual    = Object.values(expenses).reduce((s,v) => s + (Number(v.actual)||0), 0);
+  useEffect(() => { saveStore(store); }, [store]);
+
+  // Current month's working data (fresh template if untouched)
+  const cur = store[key] || buildInitial();
+  const income = cur.income || buildInitial().income;
+  const expenses = cur.expenses || buildInitial().expenses;
+  const log = cur.log || [];
+
+  function patchBucket(updater) {
+    setStore(prev => {
+      const base = prev[key] || buildInitial();
+      return { ...prev, [key]: updater(base) };
+    });
+  }
+
+  const totalIncomeBudget = Object.values(income).reduce((s, v) => s + (Number(v.budgeted) || 0), 0);
+  const totalIncomeActual = Object.values(income).reduce((s, v) => s + (Number(v.actual) || 0), 0);
+  const totalExpBudget    = Object.values(expenses).reduce((s, v) => s + (Number(v.budgeted) || 0), 0);
+  const totalExpActual    = Object.values(expenses).reduce((s, v) => s + (Number(v.actual) || 0), 0);
   const netBudget = totalIncomeBudget - totalExpBudget;
   const netActual = totalIncomeActual - totalExpActual;
   const savingsRate = totalIncomeActual > 0 ? ((netActual / totalIncomeActual) * 100).toFixed(1) : 0;
+  const budgetUsed = totalIncomeActual > 0 ? Math.round((totalExpActual / totalIncomeActual) * 100) : 0;
+
+  // Animated headline numbers
+  const netAnim = useCountUp(netActual);
+  const incomeAnim = useCountUp(totalIncomeActual);
+  const expenseAnim = useCountUp(totalExpActual);
 
   function updateIncome(cat, field, val) {
-    setIncome(p => ({ ...p, [cat]: { ...p[cat], [field]: val === "" ? "" : Number(val) } }));
+    patchBucket(c => ({ ...c, income: { ...c.income, [cat]: { ...c.income[cat], [field]: val === "" ? "" : Number(val) } } }));
   }
   function updateExp(item, field, val) {
-    setExpenses(p => ({ ...p, [item]: { ...p[item], [field]: val === "" ? "" : Number(val) } }));
+    patchBucket(c => ({ ...c, expenses: { ...c.expenses, [item]: { ...c.expenses[item], [field]: val === "" ? "" : Number(val) } } }));
   }
   function addLog() {
     if (!logForm.desc || !logForm.amount) return;
     const entry = { ...logForm, id: Date.now(), amount: Number(logForm.amount) };
-    setLog(p => [entry, ...p]);
-    const amt = entry.amount;
-    if (entry.type === "Income") {
-      const match = INCOME_CATEGORIES.find(c => c === entry.cat);
-      if (match) updateIncome(match, "actual", (Number(income[match]?.actual)||0) + amt);
-    } else {
-      if (expenses[entry.cat]) updateExp(entry.cat, "actual", (Number(expenses[entry.cat]?.actual)||0) + amt);
-    }
+    patchBucket(c => {
+      const next = { ...c, log: [entry, ...(c.log || [])] };
+      if (entry.type === "Income" && next.income[entry.cat]) {
+        next.income = { ...next.income, [entry.cat]: { ...next.income[entry.cat], actual: (Number(next.income[entry.cat].actual) || 0) + entry.amount } };
+      } else if (entry.type === "Expense" && next.expenses[entry.cat]) {
+        next.expenses = { ...next.expenses, [entry.cat]: { ...next.expenses[entry.cat], actual: (Number(next.expenses[entry.cat].actual) || 0) + entry.amount } };
+      }
+      return next;
+    });
     setPulse(entry.id);
     setLogForm(p => ({ ...p, desc: "", amount: "", cat: "" }));
   }
-  function deleteLog(id) { setLog(p => p.filter(e => e.id !== id)); }
+  function deleteLog(id) {
+    patchBucket(c => ({ ...c, log: (c.log || []).filter(e => e.id !== id) }));
+  }
   function reset() {
-    if (!confirm("Reset all data for this month?")) return;
-    const i = buildInitial();
-    setIncome(i.income); setExpenses(i.expenses); setLog([]);
+    if (!confirm(`Reset all data for ${MONTH_NAMES[month]} ${year}?`)) return;
+    setStore(prev => ({ ...prev, [key]: buildInitial() }));
   }
 
   const pct = (a, b) => b > 0 ? Math.min(100, Math.round((a / b) * 100)) : 0;
   const health = netActual >= 0 ? (savingsRate >= 20 ? "Healthy" : savingsRate >= 5 ? "Okay" : "Watch Out") : "Over Budget";
   const healthColorCls = health === "Healthy" ? "text-emerald-400" : health === "Okay" ? "text-yellow-400" : health === "Watch Out" ? "text-orange-400" : "text-error";
+  const gaugeColor = netActual >= 0 ? (savingsRate >= 20 ? "#8be9a8" : "#9dcbfc") : "#ffb4ab";
 
   const sectionTotals = {};
   Object.entries(EXPENSE_SECTIONS).forEach(([sec, items]) => {
     sectionTotals[sec] = { budgeted: 0, actual: 0 };
     items.forEach(item => {
-      sectionTotals[sec].budgeted += Number(expenses[item]?.budgeted)||0;
-      sectionTotals[sec].actual   += Number(expenses[item]?.actual)||0;
+      sectionTotals[sec].budgeted += Number(expenses[item]?.budgeted) || 0;
+      sectionTotals[sec].actual   += Number(expenses[item]?.actual) || 0;
     });
   });
+
+  // Donut segments (only sections with actual spend), sorted big→small
+  const donutSegments = Object.entries(sectionTotals)
+    .map(([sec, t]) => ({ label: sec, value: t.actual, color: SECTION_COLORS[sec] }))
+    .filter(s => s.value > 0)
+    .sort((a, b) => b.value - a.value);
+
+  // 50/30/20 actuals
+  const ruleActual = { needs: 0, wants: 0, savings: 0 };
+  Object.entries(sectionTotals).forEach(([sec, t]) => {
+    const b = RULE_BUCKET[sec]; if (b) ruleActual[b] += t.actual;
+  });
+
+  // Cash-flow mini chart — net per day from the last (chronological) entries
+  const cashFlow = useMemo(() => {
+    const byDay = {};
+    [...log].forEach(e => {
+      const d = e.date || "";
+      byDay[d] = (byDay[d] || 0) + (e.type === "Income" ? e.amount : -e.amount);
+    });
+    return Object.entries(byDay)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .slice(-10)
+      .map(([d, v]) => ({ d, v }));
+  }, [log]);
+  const cashMax = Math.max(1, ...cashFlow.map(p => Math.abs(p.v)));
 
   const inputCls = "w-full bg-surface-container-lowest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary transition-all";
 
@@ -179,7 +345,7 @@ export default function BudgetApp() {
           <div className="flex justify-between items-center px-4 md:px-8 py-4">
             <div>
               <h1 className="text-lg md:text-2xl font-bold bg-gradient-to-r from-primary to-tertiary bg-clip-text text-transparent font-headline tracking-tight">Abyssal Navigator</h1>
-              <p className="text-xs text-on-surface-variant">{MONTH_NAMES[month]} {now.getFullYear()} · Saudi Riyal (﷼)</p>
+              <p className="text-xs text-on-surface-variant">{MONTH_NAMES[month]} {year} · Saudi Riyal (﷼)</p>
             </div>
             <div className="flex items-center gap-2 md:gap-3">
               <select value={month} onChange={e => setMonth(Number(e.target.value))}
@@ -198,121 +364,197 @@ export default function BudgetApp() {
 
           {/* ── DASHBOARD ── */}
           {tab === 0 && (
-            <div className="space-y-8">
-              {/* Hero */}
-              <section className="relative rounded-xl overflow-hidden p-8 md:p-12">
+            <div className="space-y-6 md:space-y-8">
+              {/* Hero with live aurora + savings gauge */}
+              <section className="relative rounded-2xl overflow-hidden ring-1 ring-white/5">
                 <div className="absolute inset-0 bg-gradient-to-br from-surface-container-low via-surface-container-highest to-surface" />
-                <div className="absolute -top-16 -right-16 w-72 h-72 bg-primary/20 blur-[80px] rounded-full" />
-                <div className="absolute -bottom-16 -left-16 w-64 h-64 bg-tertiary/10 blur-[80px] rounded-full" />
-                <div className="relative z-10 flex flex-col md:flex-row md:items-end md:justify-between gap-6">
+                <div className="aurora absolute -top-24 -right-10 w-[420px] h-[420px] rounded-full blur-[90px] opacity-60" />
+                <div className="aurora-2 absolute -bottom-24 -left-10 w-[360px] h-[360px] rounded-full blur-[90px] opacity-50" />
+                <div className="relative z-10 grid grid-cols-1 lg:grid-cols-[1.4fr_1fr] gap-8 p-7 md:p-10 items-center">
                   <div>
-                    <span className="text-xs uppercase tracking-widest text-on-surface-variant font-semibold">Net Savings Overview</span>
-                    <h2 className={`font-headline text-4xl md:text-6xl font-extrabold mt-2 text-glow ${netActual >= 0 ? "text-on-surface" : "text-error"}`}>
-                      {fmt(netActual)}
+                    <span className="text-xs uppercase tracking-[0.2em] text-on-surface-variant font-semibold">Net Savings · {MONTH_NAMES[month]}</span>
+                    <h2 className={`font-headline text-5xl md:text-7xl font-extrabold mt-3 text-glow tabular-nums ${netActual >= 0 ? "text-on-surface" : "text-error"}`}>
+                      {fmt(netAnim)}
                     </h2>
-                    <div className={`mt-2 flex items-center gap-2 text-sm font-medium ${netActual >= 0 ? "text-primary" : "text-error"}`}>
-                      <span className="material-symbols-outlined text-sm">{netActual >= 0 ? "trending_up" : "trending_down"}</span>
+                    <div className={`mt-3 inline-flex items-center gap-2 text-sm font-medium px-3 py-1.5 rounded-full ${netActual >= 0 ? "bg-primary/10 text-primary" : "bg-error/10 text-error"}`}>
+                      <span className="material-symbols-outlined text-base">{netActual >= 0 ? "trending_up" : "trending_down"}</span>
                       <span>{savingsRate}% savings rate · <span className={healthColorCls}>{health}</span></span>
                     </div>
+                    <div className="mt-7 flex gap-3 flex-wrap">
+                      <div className="glass-card px-5 py-3 rounded-xl ring-1 ring-outline-variant/20">
+                        <span className="text-xs text-on-surface-variant block mb-1">Income</span>
+                        <span className="font-headline text-lg font-bold text-primary tabular-nums">{fmt(totalIncomeActual)}</span>
+                      </div>
+                      <div className="glass-card px-5 py-3 rounded-xl ring-1 ring-outline-variant/20">
+                        <span className="text-xs text-on-surface-variant block mb-1">Expenses</span>
+                        <span className="font-headline text-lg font-bold text-error tabular-nums">{fmt(totalExpActual)}</span>
+                      </div>
+                      <div className="glass-card px-5 py-3 rounded-xl ring-1 ring-outline-variant/20">
+                        <span className="text-xs text-on-surface-variant block mb-1">Planned Net</span>
+                        <span className={`font-headline text-lg font-bold tabular-nums ${netBudget >= 0 ? "text-on-surface" : "text-error"}`}>{fmt(netBudget)}</span>
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex gap-4 flex-wrap">
-                    <div className="glass-card px-5 py-4 rounded-xl ring-1 ring-outline-variant/20">
-                      <span className="text-xs text-on-surface-variant block mb-1">Total Budgeted</span>
-                      <span className="font-headline text-lg font-bold tabular-nums">{fmt(totalIncomeBudget)}</span>
-                    </div>
-                    <div className="glass-card px-5 py-4 rounded-xl ring-1 ring-outline-variant/20 bg-primary/5">
-                      <span className="text-xs text-primary block mb-1">Total Income</span>
-                      <span className="font-headline text-lg font-bold text-primary tabular-nums">{fmt(totalIncomeActual)}</span>
-                    </div>
+                  <div className="flex flex-col items-center">
+                    <RadialGauge pct={netActual >= 0 ? Number(savingsRate) : budgetUsed}
+                      color={gaugeColor}
+                      value={`${netActual >= 0 ? savingsRate : budgetUsed}%`}
+                      label={netActual >= 0 ? "saved" : "of income"} />
+                    <p className="text-xs text-on-surface-variant mt-2 text-center">
+                      {budgetUsed}% of income spent
+                    </p>
                   </div>
                 </div>
               </section>
 
               {/* KPI bento */}
-              <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="bg-surface-container-low p-6 rounded-xl relative overflow-hidden group hover:bg-surface-container-high transition-colors">
-                  <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                    <span className="material-symbols-outlined text-6xl text-primary">payments</span>
+              <section className="grid grid-cols-1 md:grid-cols-3 gap-5 md:gap-6">
+                {[
+                  { label: "Total Income", icon: "payments", color: "text-primary", anim: incomeAnim,
+                    barCls: "bg-gradient-to-r from-primary to-primary-container glow-bar",
+                    p: pct(totalIncomeActual, totalIncomeBudget), sub: totalIncomeBudget > 0 ? `${pct(totalIncomeActual, totalIncomeBudget)}% of plan` : "" },
+                  { label: "Total Expenses", icon: "receipt_long", color: "text-error", anim: expenseAnim,
+                    barCls: pct(totalExpActual, totalExpBudget) > 90 ? "bg-error glow-bar-error" : "bg-gradient-to-r from-error to-error-container glow-bar-error",
+                    p: pct(totalExpActual, totalExpBudget), sub: totalExpBudget > 0 ? `${pct(totalExpActual, totalExpBudget)}% of budget` : "" },
+                  { label: "Net Savings", icon: "savings", color: "text-tertiary", anim: netAnim, neg: netActual < 0,
+                    barCls: "bg-gradient-to-r from-tertiary to-tertiary-container glow-bar-tertiary",
+                    p: Math.max(0, pct(netActual, totalIncomeActual)), sub: health },
+                ].map(k => (
+                  <div key={k.label} className="bg-surface-container-low p-6 rounded-2xl relative overflow-hidden group hover:bg-surface-container-high transition-colors ring-1 ring-white/5">
+                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                      <span className={`material-symbols-outlined text-6xl ${k.color}`}>{k.icon}</span>
+                    </div>
+                    <span className="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">{k.label}</span>
+                    <div className="mt-4 flex items-baseline gap-2">
+                      <span className={`text-3xl font-bold font-headline tabular-nums ${k.neg ? "text-error" : ""}`}>{fmt(k.anim)}</span>
+                      <span className={`text-xs ${k.color}`}>{k.sub}</span>
+                    </div>
+                    <div className="mt-6 h-1.5 w-full bg-surface-container-highest rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full transition-all duration-700 ${k.barCls}`} style={{ width: `${k.p}%` }} />
+                    </div>
                   </div>
-                  <span className="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">Total Income</span>
-                  <div className="mt-4 flex items-baseline gap-2">
-                    <span className="text-3xl font-bold font-headline tabular-nums">{fmt(totalIncomeActual)}</span>
-                    <span className="text-xs text-primary">{totalIncomeBudget > 0 ? `${pct(totalIncomeActual,totalIncomeBudget)}%` : ""}</span>
-                  </div>
-                  <div className="mt-6 h-1 w-full bg-surface-container-highest rounded-full overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-primary to-primary-container rounded-full glow-bar transition-all duration-700" style={{width:`${pct(totalIncomeActual,totalIncomeBudget)}%`}} />
-                  </div>
-                </div>
-                <div className="bg-surface-container-low p-6 rounded-xl relative overflow-hidden group hover:bg-surface-container-high transition-colors">
-                  <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                    <span className="material-symbols-outlined text-6xl text-error">receipt_long</span>
-                  </div>
-                  <span className="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">Total Expenses</span>
-                  <div className="mt-4 flex items-baseline gap-2">
-                    <span className="text-3xl font-bold font-headline tabular-nums">{fmt(totalExpActual)}</span>
-                    <span className={`text-xs ${pct(totalExpActual,totalExpBudget)>90?"text-error":"text-on-surface-variant"}`}>
-                      {totalExpBudget>0?`${pct(totalExpActual,totalExpBudget)}% of budget`:""}
-                    </span>
-                  </div>
-                  <div className="mt-6 h-1 w-full bg-surface-container-highest rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full transition-all duration-700 glow-bar-error ${pct(totalExpActual,totalExpBudget)>90?"bg-error":"bg-gradient-to-r from-error to-error-container"}`}
-                      style={{width:`${pct(totalExpActual,totalExpBudget)}%`}} />
-                  </div>
-                </div>
-                <div className="bg-surface-container-low p-6 rounded-xl relative overflow-hidden group hover:bg-surface-container-high transition-colors">
-                  <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                    <span className="material-symbols-outlined text-6xl text-tertiary">savings</span>
-                  </div>
-                  <span className="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">Net Savings</span>
-                  <div className="mt-4 flex items-baseline gap-2">
-                    <span className={`text-3xl font-bold font-headline tabular-nums ${netActual<0?"text-error":""}`}>{fmt(netActual)}</span>
-                    <span className={`text-xs font-medium ${healthColorCls}`}>{health}</span>
-                  </div>
-                  <div className="mt-6 h-1 w-full bg-surface-container-highest rounded-full overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-tertiary to-tertiary-container rounded-full glow-bar-tertiary transition-all duration-700"
-                      style={{width:`${Math.max(0,pct(netActual,totalIncomeActual))}%`}} />
-                  </div>
-                </div>
+                ))}
               </section>
 
-              {/* Category breakdown + 50/30/20 */}
-              <section className="grid grid-cols-1 lg:grid-cols-5 gap-8">
-                <div className="lg:col-span-3 bg-surface-container-lowest p-6 md:p-8 rounded-xl ring-1 ring-outline-variant/10">
-                  <h2 className="font-headline text-xl font-bold mb-6">Spending by Category</h2>
-                  <div className="space-y-4">
-                    {Object.entries(sectionTotals).map(([sec,{budgeted,actual}]) => {
-                      const p = pct(actual,budgeted);
-                      const over = actual>budgeted && budgeted>0;
+              {/* Donut allocation + Spending bars */}
+              <section className="grid grid-cols-1 lg:grid-cols-5 gap-6 md:gap-8">
+                {/* Donut */}
+                <div className="lg:col-span-2 bg-surface-container-lowest p-6 md:p-7 rounded-2xl ring-1 ring-outline-variant/10">
+                  <h2 className="font-headline text-lg font-bold mb-1">Expense Allocation</h2>
+                  <p className="text-xs text-on-surface-variant mb-5">Where your money went this month</p>
+                  {donutSegments.length > 0 ? (
+                    <>
+                      <DonutChart segments={donutSegments} center={fmtCompact(totalExpActual)} sub="spent" />
+                      <div className="mt-6 space-y-2">
+                        {donutSegments.slice(0, 5).map(s => (
+                          <div key={s.label} className="flex items-center gap-2 text-xs">
+                            <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: s.color }} />
+                            <span className="flex-1 text-on-surface-variant truncate">{s.label}</span>
+                            <span className="tabular-nums text-on-surface">{Math.round((s.value / totalExpActual) * 100)}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="py-16 text-center text-on-surface-variant/50 text-sm">
+                      <span className="material-symbols-outlined text-4xl block mb-2">donut_large</span>
+                      Add expenses to see your allocation
+                    </div>
+                  )}
+                </div>
+
+                {/* Spending by category */}
+                <div className="lg:col-span-3 bg-surface-container-lowest p-6 md:p-8 rounded-2xl ring-1 ring-outline-variant/10">
+                  <h2 className="font-headline text-lg font-bold mb-5">Spending by Category</h2>
+                  <div className="space-y-3.5">
+                    {Object.entries(sectionTotals).map(([sec, { budgeted, actual }]) => {
+                      const p = pct(actual, budgeted);
+                      const over = actual > budgeted && budgeted > 0;
                       return (
                         <div key={sec}>
                           <div className="flex justify-between text-xs mb-1.5">
-                            <span className={`font-medium ${over?"text-error":"text-on-surface"}`}>{sec}</span>
+                            <span className={`font-medium ${over ? "text-error" : "text-on-surface"}`}>{sec}</span>
                             <span className="text-on-surface-variant tabular-nums">{fmt(actual)} / {fmt(budgeted)}</span>
                           </div>
-                          <div className="h-1.5 w-full bg-surface-container-highest rounded-full overflow-hidden">
-                            <div className={`h-full rounded-full transition-all duration-500 ${over?"bg-error glow-bar-error":"bg-gradient-to-r from-primary to-primary-container glow-bar"}`}
-                              style={{width:`${p}%`}} />
+                          <div className="h-2 w-full bg-surface-container-highest rounded-full overflow-hidden">
+                            <div className="h-full rounded-full transition-all duration-500"
+                              style={{ width: `${p}%`, background: over ? "#ffb4ab" : SECTION_COLORS[sec],
+                                boxShadow: `0 0 10px ${over ? "#ffb4ab" : SECTION_COLORS[sec]}66` }} />
                           </div>
                         </div>
                       );
                     })}
                   </div>
                 </div>
-                <div className="lg:col-span-2 bg-gradient-to-br from-tertiary/20 to-primary/5 p-6 md:p-8 rounded-xl border border-white/5">
-                  <span className="material-symbols-outlined text-tertiary mb-4 block">auto_awesome</span>
-                  <h3 className="font-headline text-xl font-bold mb-2">50/30/20 Rule</h3>
-                  <p className="text-xs text-on-surface-variant mb-6 leading-relaxed">Based on your actual income of {fmt(totalIncomeActual)}</p>
-                  <div className="space-y-3">
+              </section>
+
+              {/* Cash flow + 50/30/20 */}
+              <section className="grid grid-cols-1 lg:grid-cols-5 gap-6 md:gap-8">
+                {/* Cash flow */}
+                <div className="lg:col-span-3 bg-surface-container-lowest p-6 md:p-8 rounded-2xl ring-1 ring-outline-variant/10">
+                  <div className="flex items-center justify-between mb-6">
+                    <div>
+                      <h2 className="font-headline text-lg font-bold">Daily Cash Flow</h2>
+                      <p className="text-xs text-on-surface-variant">Net movement per logged day</p>
+                    </div>
+                    <span className="material-symbols-outlined text-tertiary">show_chart</span>
+                  </div>
+                  {cashFlow.length > 0 ? (
+                    <div className="flex items-end justify-between gap-2 h-44">
+                      {cashFlow.map((p, i) => {
+                        const h = (Math.abs(p.v) / cashMax) * 100;
+                        const pos = p.v >= 0;
+                        return (
+                          <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group">
+                            <span className="text-[10px] mb-1 tabular-nums opacity-0 group-hover:opacity-100 transition-opacity"
+                              style={{ color: pos ? "#8be9a8" : "#ffb4ab" }}>{fmtCompact(p.v)}</span>
+                            <div className="w-full rounded-t-md transition-all duration-500"
+                              style={{ height: `${Math.max(4, h)}%`,
+                                background: pos ? "linear-gradient(180deg,#8be9a8,#2e8b6a)" : "linear-gradient(180deg,#ffb4ab,#93000a)",
+                                boxShadow: `0 0 10px ${pos ? "#8be9a855" : "#ffb4ab55"}` }} />
+                            <span className="text-[9px] text-on-surface-variant mt-1.5">{p.d.slice(5)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="py-16 text-center text-on-surface-variant/50 text-sm">
+                      <span className="material-symbols-outlined text-4xl block mb-2">bar_chart</span>
+                      Log transactions to chart your cash flow
+                    </div>
+                  )}
+                </div>
+
+                {/* 50/30/20 with progress vs target */}
+                <div className="lg:col-span-2 bg-gradient-to-br from-tertiary/20 to-primary/5 p-6 md:p-7 rounded-2xl border border-white/5">
+                  <span className="material-symbols-outlined text-tertiary mb-3 block">auto_awesome</span>
+                  <h3 className="font-headline text-lg font-bold mb-1">50 / 30 / 20 Rule</h3>
+                  <p className="text-xs text-on-surface-variant mb-5">vs your income of {fmt(totalIncomeActual)}</p>
+                  <div className="space-y-4">
                     {[
-                      {label:"50% Needs",  target:totalIncomeActual*0.5, cls:"text-primary"},
-                      {label:"30% Wants",  target:totalIncomeActual*0.3, cls:"text-tertiary"},
-                      {label:"20% Savings",target:totalIncomeActual*0.2, cls:"text-emerald-400"},
-                    ].map(r => (
-                      <div key={r.label} className="flex justify-between items-center text-sm py-2 border-b border-outline-variant/20">
-                        <span className="text-on-surface-variant">{r.label}</span>
-                        <span className={`font-bold font-headline tabular-nums ${r.cls}`}>{fmt(r.target)}</span>
-                      </div>
-                    ))}
+                      { label: "Needs", share: 0.5, actual: ruleActual.needs, cls: "#9dcbfc" },
+                      { label: "Wants", share: 0.3, actual: ruleActual.wants, cls: "#d5bbfd" },
+                      { label: "Savings", share: 0.2, actual: Math.max(ruleActual.savings, netActual), cls: "#8be9a8" },
+                    ].map(r => {
+                      const target = totalIncomeActual * r.share;
+                      const p = target > 0 ? Math.min(100, Math.round((r.actual / target) * 100)) : 0;
+                      const over = r.label !== "Savings" && r.actual > target && target > 0;
+                      return (
+                        <div key={r.label}>
+                          <div className="flex justify-between items-baseline text-xs mb-1.5">
+                            <span className="text-on-surface-variant">{Math.round(r.share * 100)}% {r.label}</span>
+                            <span className="tabular-nums font-medium">
+                              <span style={{ color: over ? "#ffb4ab" : r.cls }}>{fmt(r.actual)}</span>
+                              <span className="text-on-surface-variant"> / {fmt(target)}</span>
+                            </span>
+                          </div>
+                          <div className="h-1.5 w-full bg-surface-container-highest/60 rounded-full overflow-hidden">
+                            <div className="h-full rounded-full transition-all duration-700"
+                              style={{ width: `${p}%`, background: over ? "#ffb4ab" : r.cls }} />
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </section>
@@ -344,8 +586,8 @@ export default function BudgetApp() {
                 </div>
                 <div className="divide-y divide-outline-variant/10">
                   {INCOME_CATEGORIES.map(cat => {
-                    const p = pct(income[cat]?.actual||0, income[cat]?.budgeted||0);
-                    const badgeCls = p>=100?"text-primary bg-primary/10":p>=50?"text-tertiary bg-tertiary/10":"text-error bg-error/10";
+                    const p = pct(income[cat]?.actual || 0, income[cat]?.budgeted || 0);
+                    const badgeCls = p >= 100 ? "text-primary bg-primary/10" : p >= 50 ? "text-tertiary bg-tertiary/10" : "text-error bg-error/10";
                     return (
                       <div key={cat} className="hover:bg-surface-container-high transition-colors">
                         {/* Mobile */}
@@ -355,16 +597,16 @@ export default function BudgetApp() {
                               <span className="material-symbols-outlined text-primary text-lg">{INCOME_ICONS[cat]}</span>
                             </div>
                             <span className="font-semibold text-sm flex-1">{cat}</span>
-                            {income[cat]?.budgeted>0 && <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${badgeCls}`}>{p}%</span>}
+                            {income[cat]?.budgeted > 0 && <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${badgeCls}`}>{p}%</span>}
                           </div>
                           <div className="grid grid-cols-2 gap-2">
                             <div>
                               <label className="text-xs text-on-surface-variant mb-1 block">Budgeted</label>
-                              <input type="number" min="0" inputMode="decimal" value={income[cat]?.budgeted??""} onChange={e=>updateIncome(cat,"budgeted",e.target.value)} className={inputCls} placeholder="0" />
+                              <input type="number" min="0" inputMode="decimal" value={income[cat]?.budgeted ?? ""} onChange={e => updateIncome(cat, "budgeted", e.target.value)} className={inputCls} placeholder="0" />
                             </div>
                             <div>
                               <label className="text-xs text-on-surface-variant mb-1 block">Actual</label>
-                              <input type="number" min="0" inputMode="decimal" value={income[cat]?.actual??""} onChange={e=>updateIncome(cat,"actual",e.target.value)} className={inputCls} placeholder="0" />
+                              <input type="number" min="0" inputMode="decimal" value={income[cat]?.actual ?? ""} onChange={e => updateIncome(cat, "actual", e.target.value)} className={inputCls} placeholder="0" />
                             </div>
                           </div>
                         </div>
@@ -376,10 +618,10 @@ export default function BudgetApp() {
                             </div>
                             <span className="text-sm font-medium">{cat}</span>
                           </div>
-                          <input type="number" min="0" inputMode="decimal" value={income[cat]?.budgeted??""} onChange={e=>updateIncome(cat,"budgeted",e.target.value)} className={`${inputCls} text-center`} placeholder="0" />
-                          <input type="number" min="0" inputMode="decimal" value={income[cat]?.actual??""} onChange={e=>updateIncome(cat,"actual",e.target.value)} className={`${inputCls} text-center`} placeholder="0" />
+                          <input type="number" min="0" inputMode="decimal" value={income[cat]?.budgeted ?? ""} onChange={e => updateIncome(cat, "budgeted", e.target.value)} className={`${inputCls} text-center`} placeholder="0" />
+                          <input type="number" min="0" inputMode="decimal" value={income[cat]?.actual ?? ""} onChange={e => updateIncome(cat, "actual", e.target.value)} className={`${inputCls} text-center`} placeholder="0" />
                           <div className="flex justify-center">
-                            {income[cat]?.budgeted>0
+                            {income[cat]?.budgeted > 0
                               ? <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${badgeCls}`}>{p}%</span>
                               : <span className="text-on-surface-variant/40">—</span>}
                           </div>
@@ -392,7 +634,7 @@ export default function BudgetApp() {
                   <span className="font-bold text-primary font-headline">TOTAL</span>
                   <span className="text-center font-bold tabular-nums">{fmt(totalIncomeBudget)}</span>
                   <span className="text-center font-bold text-primary tabular-nums">{fmt(totalIncomeActual)}</span>
-                  <span className="text-center text-on-surface-variant text-sm">{totalIncomeBudget>0?`${pct(totalIncomeActual,totalIncomeBudget)}%`:"—"}</span>
+                  <span className="text-center text-on-surface-variant text-sm">{totalIncomeBudget > 0 ? `${pct(totalIncomeActual, totalIncomeBudget)}%` : "—"}</span>
                 </div>
               </div>
             </div>
@@ -419,36 +661,36 @@ export default function BudgetApp() {
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                 {Object.entries(EXPENSE_SECTIONS).map(([sec, items]) => {
-                  const {budgeted, actual} = sectionTotals[sec];
+                  const { budgeted, actual } = sectionTotals[sec];
                   const p = pct(actual, budgeted);
                   const over = actual > budgeted && budgeted > 0;
                   return (
-                    <div key={sec} className={`glass-card p-6 rounded-xl border flex flex-col gap-4 transition-all duration-300 ${over?"border-error/20 bg-error/5 hover:bg-error/10":"border-outline-variant/5 hover:bg-surface-container-high/80"}`}>
+                    <div key={sec} className={`glass-card p-6 rounded-xl border flex flex-col gap-4 transition-all duration-300 ${over ? "border-error/20 bg-error/5 hover:bg-error/10" : "border-outline-variant/5 hover:bg-surface-container-high/80"}`}>
                       <div className="flex items-start justify-between">
-                        <div className={`w-11 h-11 rounded-xl flex items-center justify-center ${over?"bg-error/10":"bg-primary/10"}`}>
-                          <span className={`material-symbols-outlined text-2xl ${over?"text-error":"text-primary"}`}>{SECTION_ICONS[sec]}</span>
+                        <div className={`w-11 h-11 rounded-xl flex items-center justify-center ${over ? "bg-error/10" : "bg-primary/10"}`}>
+                          <span className={`material-symbols-outlined text-2xl ${over ? "text-error" : "text-primary"}`}>{SECTION_ICONS[sec]}</span>
                         </div>
                         {over && <span className="px-2 py-0.5 rounded-md bg-error text-on-error text-[10px] font-bold uppercase tracking-wider">Over Budget</span>}
                       </div>
                       <div>
                         <h3 className="text-lg font-bold font-headline mb-1">{sec.replace(/^\S+\s/, "")}</h3>
-                        <div className={`flex justify-between text-xs mb-3 ${over?"text-error font-semibold":"text-on-surface-variant"}`}>
+                        <div className={`flex justify-between text-xs mb-3 ${over ? "text-error font-semibold" : "text-on-surface-variant"}`}>
                           <span>Spent: {fmt(actual)}</span>
                           <span>Budget: {fmt(budgeted)}</span>
                         </div>
                         <div className="h-1.5 w-full bg-surface-container-highest rounded-full overflow-hidden">
-                          <div className={`h-full rounded-full transition-all duration-500 ${over?"bg-error glow-bar-error":"bg-gradient-to-r from-primary to-primary-fixed-dim glow-bar"}`}
-                            style={{width:`${p}%`}} />
+                          <div className="h-full rounded-full transition-all duration-500"
+                            style={{ width: `${p}%`, background: over ? "#ffb4ab" : SECTION_COLORS[sec], boxShadow: `0 0 10px ${over ? "#ffb4ab" : SECTION_COLORS[sec]}66` }} />
                         </div>
                       </div>
                       <div className="space-y-2 border-t border-outline-variant/10 pt-3">
                         {items.map(item => (
                           <div key={item} className="flex items-center gap-2">
                             <span className="text-xs text-on-surface-variant flex-1 truncate">{item}</span>
-                            <input type="number" min="0" inputMode="decimal" value={expenses[item]?.budgeted??""} onChange={e=>updateExp(item,"budgeted",e.target.value)} placeholder="Budget"
+                            <input type="number" min="0" inputMode="decimal" value={expenses[item]?.budgeted ?? ""} onChange={e => updateExp(item, "budgeted", e.target.value)} placeholder="Budget"
                               className="w-20 bg-surface-container-lowest border border-outline-variant/20 rounded px-2 py-1 text-xs text-center text-on-surface focus:outline-none focus:ring-1 focus:ring-primary" />
-                            <input type="number" min="0" inputMode="decimal" value={expenses[item]?.actual??""} onChange={e=>updateExp(item,"actual",e.target.value)} placeholder="Actual"
-                              className={`w-20 bg-surface-container-lowest border rounded px-2 py-1 text-xs text-center focus:outline-none focus:ring-1 ${pct(expenses[item]?.actual||0,expenses[item]?.budgeted||0)>100?"border-error/50 text-error focus:ring-error":"border-outline-variant/20 text-primary focus:ring-primary"}`} />
+                            <input type="number" min="0" inputMode="decimal" value={expenses[item]?.actual ?? ""} onChange={e => updateExp(item, "actual", e.target.value)} placeholder="Actual"
+                              className={`w-20 bg-surface-container-lowest border rounded px-2 py-1 text-xs text-center focus:outline-none focus:ring-1 ${pct(expenses[item]?.actual || 0, expenses[item]?.budgeted || 0) > 100 ? "border-error/50 text-error focus:ring-error" : "border-outline-variant/20 text-primary focus:ring-primary"}`} />
                           </div>
                         ))}
                       </div>
@@ -475,14 +717,14 @@ export default function BudgetApp() {
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="text-xs text-on-surface-variant mb-1.5 block font-medium uppercase tracking-wider">Date</label>
-                      <input type="date" value={logForm.date} onChange={e=>setLogForm(p=>({...p,date:e.target.value}))} className={inputCls} />
+                      <input type="date" value={logForm.date} onChange={e => setLogForm(p => ({ ...p, date: e.target.value }))} className={inputCls} />
                     </div>
                     <div>
                       <label className="text-xs text-on-surface-variant mb-1.5 block font-medium uppercase tracking-wider">Type</label>
                       <div className="flex rounded-lg overflow-hidden border border-outline-variant/30">
-                        {["Income","Expense"].map(type => (
-                          <button key={type} onClick={()=>setLogForm(p=>({...p,type,cat:""}))}
-                            className={`flex-1 py-2 text-sm font-semibold transition-all ${logForm.type===type?(type==="Income"?"bg-primary text-on-primary":"bg-error text-on-error"):"bg-surface-container-lowest text-on-surface-variant hover:bg-surface-container"}`}>
+                        {["Income", "Expense"].map(type => (
+                          <button key={type} onClick={() => setLogForm(p => ({ ...p, type, cat: "" }))}
+                            className={`flex-1 py-2 text-sm font-semibold transition-all ${logForm.type === type ? (type === "Income" ? "bg-primary text-on-primary" : "bg-error text-on-error") : "bg-surface-container-lowest text-on-surface-variant hover:bg-surface-container"}`}>
                             {type}
                           </button>
                         ))}
@@ -491,23 +733,23 @@ export default function BudgetApp() {
                   </div>
                   <div>
                     <label className="text-xs text-on-surface-variant mb-1.5 block font-medium uppercase tracking-wider">Description</label>
-                    <input type="text" placeholder="e.g. Danube groceries" value={logForm.desc} onChange={e=>setLogForm(p=>({...p,desc:e.target.value}))} className={inputCls} />
+                    <input type="text" placeholder="e.g. Danube groceries" value={logForm.desc} onChange={e => setLogForm(p => ({ ...p, desc: e.target.value }))} className={inputCls} />
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="text-xs text-on-surface-variant mb-1.5 block font-medium uppercase tracking-wider">Amount ({CURRENCY})</label>
-                      <input type="number" min="0" inputMode="decimal" placeholder="0" value={logForm.amount} onChange={e=>setLogForm(p=>({...p,amount:e.target.value}))} className={inputCls} />
+                      <input type="number" min="0" inputMode="decimal" placeholder="0" value={logForm.amount} onChange={e => setLogForm(p => ({ ...p, amount: e.target.value }))} className={inputCls} />
                     </div>
                     <div>
                       <label className="text-xs text-on-surface-variant mb-1.5 block font-medium uppercase tracking-wider">Category</label>
-                      <select value={logForm.cat} onChange={e=>setLogForm(p=>({...p,cat:e.target.value}))}
+                      <select value={logForm.cat} onChange={e => setLogForm(p => ({ ...p, cat: e.target.value }))}
                         className="w-full bg-surface-container-lowest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary transition-all">
                         <option value="">Select...</option>
-                        {logForm.type==="Income"
-                          ? INCOME_CATEGORIES.map(c=><option key={c}>{c}</option>)
-                          : Object.entries(EXPENSE_SECTIONS).map(([s,items])=>(
-                              <optgroup key={s} label={s}>{items.map(i=><option key={i}>{i}</option>)}</optgroup>
-                            ))}
+                        {logForm.type === "Income"
+                          ? INCOME_CATEGORIES.map(c => <option key={c}>{c}</option>)
+                          : Object.entries(EXPENSE_SECTIONS).map(([s, items]) => (
+                            <optgroup key={s} label={s}>{items.map(i => <option key={i}>{i}</option>)}</optgroup>
+                          ))}
                       </select>
                     </div>
                   </div>
@@ -521,9 +763,9 @@ export default function BudgetApp() {
               <div className="bg-surface-container-low rounded-xl overflow-hidden ring-1 ring-outline-variant/5">
                 <div className="px-6 py-4 border-b border-outline-variant/10 flex justify-between items-center">
                   <h3 className="font-headline font-bold text-lg">Recent Flux</h3>
-                  <span className="text-xs text-on-surface-variant tabular-nums">{log.length} transactions · {fmt(log.reduce((s,e)=>e.type==="Expense"?s+e.amount:s,0))} expenses</span>
+                  <span className="text-xs text-on-surface-variant tabular-nums">{log.length} transactions · {fmt(log.reduce((s, e) => e.type === "Expense" ? s + e.amount : s, 0))} expenses</span>
                 </div>
-                {log.length===0 ? (
+                {log.length === 0 ? (
                   <div className="py-16 text-center">
                     <span className="material-symbols-outlined text-5xl text-on-surface-variant/30 block mb-3">receipt_long</span>
                     <p className="text-on-surface-variant text-sm">No transactions yet. Add your first one above.</p>
@@ -532,24 +774,24 @@ export default function BudgetApp() {
                   <div className="divide-y divide-outline-variant/5">
                     {log.map(entry => (
                       <div key={entry.id}
-                        className={`flex items-center justify-between p-4 md:p-5 hover:bg-surface-container-high transition-colors ${pulse===entry.id?"animate-[fadeIn_0.4s_ease]":""}`}
-                        style={{borderLeft:`3px solid ${entry.type==="Income"?"#9dcbfc":"#ffb4ab"}`}}>
+                        className={`flex items-center justify-between p-4 md:p-5 hover:bg-surface-container-high transition-colors ${pulse === entry.id ? "animate-[fadeIn_0.4s_ease]" : ""}`}
+                        style={{ borderLeft: `3px solid ${entry.type === "Income" ? "#9dcbfc" : "#ffb4ab"}` }}>
                         <div className="flex items-center gap-4">
                           <div className="w-10 h-10 rounded-full bg-surface-container-highest flex items-center justify-center flex-shrink-0">
-                            <span className={`material-symbols-outlined text-base ${entry.type==="Income"?"text-primary":"text-error"}`}>
-                              {entry.type==="Income"?"payments":"shopping_bag"}
+                            <span className={`material-symbols-outlined text-base ${entry.type === "Income" ? "text-primary" : "text-error"}`}>
+                              {entry.type === "Income" ? "payments" : "shopping_bag"}
                             </span>
                           </div>
                           <div>
                             <p className="font-semibold text-sm">{entry.desc}</p>
-                            <p className="text-xs text-on-surface-variant">{entry.date} · {entry.cat||"Uncategorized"}</p>
+                            <p className="text-xs text-on-surface-variant">{entry.date} · {entry.cat || "Uncategorized"}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-3">
-                          <span className={`font-bold font-headline tabular-nums ${entry.type==="Income"?"text-primary":"text-error"}`}>
-                            {entry.type==="Income"?"+":"-"}{fmt(entry.amount)}
+                          <span className={`font-bold font-headline tabular-nums ${entry.type === "Income" ? "text-primary" : "text-error"}`}>
+                            {entry.type === "Income" ? "+" : "-"}{fmt(entry.amount)}
                           </span>
-                          <button onClick={()=>deleteLog(entry.id)}
+                          <button onClick={() => deleteLog(entry.id)}
                             className="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-error/10 hover:text-error transition-all">
                             <span className="material-symbols-outlined text-base">delete</span>
                           </button>
@@ -569,8 +811,8 @@ export default function BudgetApp() {
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-[60] bg-slate-950/80 backdrop-blur-xl border-t border-outline-variant/20">
         <div className="flex">
           {NAV_ITEMS.map((item, i) => (
-            <button key={item.label} onClick={()=>setTab(i)}
-              className={`flex-1 flex flex-col items-center gap-1 py-3 text-[10px] font-medium transition-all ${tab===i?"text-primary":"text-on-surface-variant"}`}>
+            <button key={item.label} onClick={() => setTab(i)}
+              className={`flex-1 flex flex-col items-center gap-1 py-3 text-[10px] font-medium transition-all ${tab === i ? "text-primary" : "text-on-surface-variant"}`}>
               <span className="material-symbols-outlined text-xl">{item.icon}</span>
               <span>{item.label}</span>
             </button>
@@ -580,6 +822,19 @@ export default function BudgetApp() {
 
       <style>{`
         @keyframes fadeIn { from { opacity:0; transform:translateY(-8px); } to { opacity:1; transform:none; } }
+        @keyframes auroraShift {
+          0%   { transform: translate(0,0) scale(1);   background: radial-gradient(circle at 30% 30%, #9dcbfc, transparent 70%); }
+          50%  { transform: translate(20px,15px) scale(1.15); background: radial-gradient(circle at 60% 50%, #6aa6e8, transparent 70%); }
+          100% { transform: translate(0,0) scale(1);   background: radial-gradient(circle at 30% 30%, #9dcbfc, transparent 70%); }
+        }
+        @keyframes auroraShift2 {
+          0%   { transform: translate(0,0) scale(1);   background: radial-gradient(circle at 40% 60%, #d5bbfd, transparent 70%); }
+          50%  { transform: translate(-25px,-10px) scale(1.2); background: radial-gradient(circle at 50% 40%, #b18bf0, transparent 70%); }
+          100% { transform: translate(0,0) scale(1);   background: radial-gradient(circle at 40% 60%, #d5bbfd, transparent 70%); }
+        }
+        .aurora  { animation: auroraShift 14s ease-in-out infinite; }
+        .aurora-2{ animation: auroraShift2 18s ease-in-out infinite; }
+        @media (prefers-reduced-motion: reduce) { .aurora, .aurora-2 { animation: none; } }
         input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; }
         input[type=date]::-webkit-calendar-picker-indicator { filter:invert(0.6); }
         ::-webkit-scrollbar { width:4px; }
