@@ -1,4 +1,9 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useLayoutEffect } from "react";
+import gsap from "gsap";
+import { ScrollTrigger } from "gsap/ScrollTrigger";
+import { SplitText } from "gsap/SplitText";
+
+gsap.registerPlugin(ScrollTrigger, SplitText);
 
 const CURRENCY = "﷼";
 
@@ -73,8 +78,46 @@ const NAV_ITEMS = [
   { label: "Dashboard", icon: "grid_view" },
   { label: "Income",    icon: "payments" },
   { label: "Expenses",  icon: "account_balance_wallet" },
+  { label: "Subs",      icon: "autorenew" },
   { label: "Log",       icon: "receipt_long" },
 ];
+
+// Popular subscription services for quick-add (emoji + brand accent + typical price/cycle)
+const SUB_PRESETS = [
+  { name: "Netflix",         emoji: "🎬", color: "#E50914", amount: 56,  cycle: "monthly" },
+  { name: "Spotify",         emoji: "🎧", color: "#1DB954", amount: 22,  cycle: "monthly" },
+  { name: "YouTube Premium", emoji: "▶️", color: "#FF0000", amount: 24,  cycle: "monthly" },
+  { name: "iCloud+",         emoji: "☁️", color: "#3693F3", amount: 12,  cycle: "monthly" },
+  { name: "Google One",      emoji: "🗂️", color: "#4285F4", amount: 8,   cycle: "monthly" },
+  { name: "ChatGPT Plus",    emoji: "🤖", color: "#10A37F", amount: 75,  cycle: "monthly" },
+  { name: "Apple Music",     emoji: "🎵", color: "#FA243C", amount: 22,  cycle: "monthly" },
+  { name: "Amazon Prime",    emoji: "📦", color: "#FF9900", amount: 16,  cycle: "monthly" },
+  { name: "Disney+",         emoji: "✨", color: "#3B5BDB", amount: 30,  cycle: "monthly" },
+  { name: "Microsoft 365",   emoji: "🧩", color: "#D83B01", amount: 380, cycle: "yearly" },
+  { name: "Adobe CC",        emoji: "🎨", color: "#FF3B30", amount: 240, cycle: "monthly" },
+  { name: "Notion",          emoji: "📝", color: "#cbd5e1", amount: 30,  cycle: "monthly" },
+];
+
+const CYCLES = ["monthly", "yearly", "weekly"];
+// Normalise any billing cycle to a monthly figure
+function monthlyOf(sub) {
+  const a = Number(sub.amount) || 0;
+  return sub.cycle === "yearly" ? a / 12 : sub.cycle === "weekly" ? (a * 52) / 12 : a;
+}
+function daysUntil(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr + "T00:00:00");
+  return Math.ceil((d - new Date(new Date().toDateString())) / 86400000);
+}
+function renewLabel(dateStr) {
+  const d = daysUntil(dateStr);
+  if (d === null) return "—";
+  if (d < 0) return "overdue";
+  if (d === 0) return "today";
+  if (d === 1) return "tomorrow";
+  if (d <= 30) return `in ${d} days`;
+  try { return new Date(dateStr + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short" }); } catch { return dateStr; }
+}
 
 function fmt(n) {
   if (!n && n !== 0) return `${CURRENCY}0`;
@@ -116,6 +159,25 @@ function loadStore() {
 }
 function saveStore(store) {
   try { window.localStorage?.setItem?.(STORAGE_KEY, JSON.stringify(store)); } catch {}
+}
+
+// Subscriptions are ongoing (not month-scoped), so they live in their own key
+const SUBS_KEY = "rabt_subs_v1";
+function loadSubs() {
+  try {
+    const raw = window.localStorage?.getItem?.(SUBS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  // Seed a couple so the section isn't empty on first run
+  const iso = d => new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
+  return [
+    { id: 1, name: "Netflix",   emoji: "🎬", color: "#E50914", amount: 56, cycle: "monthly", next: iso(5) },
+    { id: 2, name: "iCloud+",   emoji: "☁️", color: "#3693F3", amount: 12, cycle: "monthly", next: iso(12) },
+    { id: 3, name: "Spotify",   emoji: "🎧", color: "#1DB954", amount: 22, cycle: "monthly", next: iso(2) },
+  ];
+}
+function saveSubs(subs) {
+  try { window.localStorage?.setItem?.(SUBS_KEY, JSON.stringify(subs)); } catch {}
 }
 
 /* ─────────────────────────── small viz helpers ─────────────────────────── */
@@ -238,13 +300,65 @@ export default function BudgetApp() {
   const [tab, setTab] = useState(0);
   const [month, setMonth] = useState(now.getMonth());
   const [store, setStore] = useState(loadStore);
+  const [subs, setSubs] = useState(loadSubs);
+  const [subForm, setSubForm] = useState({ name: "", amount: "", cycle: "monthly", next: new Date().toISOString().slice(0, 10) });
   const [logForm, setLogForm] = useState({ date: new Date().toISOString().slice(0, 10), desc: "", amount: "", type: "Expense", cat: "" });
   const [pulse, setPulse] = useState(null);
 
   const year = now.getFullYear();
   const key = monthKey(year, month);
+  const rootRef = useRef(null);
 
   useEffect(() => { saveStore(store); }, [store]);
+  useEffect(() => { saveSubs(subs); }, [subs]);
+
+  // GSAP — scroll-driven section reveals + SplitText hero. Re-runs when the
+  // active tab or month changes (content remounts). Respects reduced-motion.
+  useLayoutEffect(() => {
+    const mm = gsap.matchMedia();
+    const ctx = gsap.context(() => {
+      mm.add("(prefers-reduced-motion: no-preference)", () => {
+        // Headline: split into chars and rise in
+        const splits = gsap.utils.toArray(".gsap-split").map(el => new SplitText(el, { type: "words,chars" }));
+        splits.forEach(s => gsap.from(s.chars, {
+          yPercent: 110, opacity: 0, stagger: 0.014, duration: 0.5, ease: "power3.out",
+        }));
+        // Sections fade/blur up as they enter the viewport
+        gsap.utils.toArray(".reveal").forEach(el => {
+          gsap.from(el, {
+            y: 30, autoAlpha: 0, filter: "blur(8px)", duration: 0.75, ease: "power3.out",
+            scrollTrigger: { trigger: el, start: "top 88%", once: true },
+          });
+        });
+        ScrollTrigger.refresh();
+
+        // Safety net: GSAP's ticker is rAF-driven. In environments where rAF is
+        // throttled (headless renderers, fully background tabs) animations can't
+        // advance and would strand content. Measure rAF *continuity* — a real
+        // browser yields ~60 ticks/sec; if we see almost none, force the final
+        // state so nothing is ever stuck hidden or mid-blur.
+        let rafTicks = 0, stopped = false;
+        const tick = () => { rafTicks++; if (!stopped) requestAnimationFrame(tick); };
+        requestAnimationFrame(tick);
+        const safety = setTimeout(() => {
+          stopped = true;
+          if (rafTicks < 10) {
+            // Kill the (frozen) tweens + triggers first so they can't re-apply
+            // their mid-flight values on the next paint, then snap to final.
+            ScrollTrigger.getAll().forEach(s => s.kill());
+            gsap.killTweensOf(".reveal");
+            splits.forEach(s => gsap.killTweensOf(s.chars));
+            gsap.set(".reveal", { clearProps: "opacity,visibility,filter,transform" });
+            // Restore original (un-split) text so headlines render normally
+            splits.forEach(s => s.revert());
+          }
+        }, 1500);
+
+        return () => { stopped = true; clearTimeout(safety); splits.forEach(s => s.revert()); };
+      });
+    }, rootRef);
+    return () => { ctx.revert(); mm.revert(); };
+  }, [tab, month]);
 
   // Current month's working data (fresh template if untouched)
   const cur = store[key] || buildInitial();
@@ -372,33 +486,71 @@ export default function BudgetApp() {
     });
   }, [log]);
 
+  // ── Subscriptions ──
+  const subsSorted = [...subs].sort((a, b) => {
+    const da = daysUntil(a.next), db = daysUntil(b.next);
+    if (da === null) return 1; if (db === null) return -1;
+    return da - db;
+  });
+  const subsMonthly = subs.reduce((s, x) => s + monthlyOf(x), 0);
+  const subsYearly = subsMonthly * 12;
+  const nextSub = subsSorted.find(s => daysUntil(s.next) !== null && daysUntil(s.next) >= 0) || subsSorted[0];
+  const subsTopShare = subsMonthly > 0 ? subsSorted.slice().sort((a, b) => monthlyOf(b) - monthlyOf(a)) : [];
+
+  function addSub(preset) {
+    const base = preset || subForm;
+    if (!base.name || !base.amount) return;
+    const entry = {
+      id: Date.now() + Math.random(),
+      name: base.name,
+      emoji: base.emoji || "💳",
+      color: base.color || "#9dcbfc",
+      amount: Number(base.amount),
+      cycle: base.cycle || "monthly",
+      next: base.next || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+    };
+    setSubs(p => [entry, ...p]);
+    if (!preset) setSubForm({ name: "", amount: "", cycle: "monthly", next: new Date().toISOString().slice(0, 10) });
+  }
+  function deleteSub(id) { setSubs(p => p.filter(s => s.id !== id)); }
+
   const inputCls = "w-full bg-surface-container-lowest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary transition-all";
 
   return (
-    <div className="min-h-screen bg-surface text-on-surface font-body">
-      {/* Ambient blobs */}
-      <div className="fixed top-[-10%] right-[-5%] w-[500px] h-[500px] bg-primary/10 blur-[120px] rounded-full -z-10 pointer-events-none" />
-      <div className="fixed bottom-[-10%] left-[-5%] w-[400px] h-[400px] bg-tertiary/10 blur-[100px] rounded-full -z-10 pointer-events-none" />
+    <div ref={rootRef} className="min-h-screen bg-surface text-on-surface font-body">
+      {/* SVG filter — edge refraction for liquid glass (progressive enhancement) */}
+      <svg width="0" height="0" className="absolute" aria-hidden="true">
+        <filter id="liquid-distortion">
+          <feTurbulence type="fractalNoise" baseFrequency="0.008 0.012" numOctaves="2" seed="7" result="noise" />
+          <feGaussianBlur in="noise" stdDeviation="2" result="blur" />
+          <feDisplacementMap in="SourceGraphic" in2="blur" scale="22" xChannelSelector="R" yChannelSelector="G" />
+        </filter>
+      </svg>
+
+      {/* Ambient colour field — richer so the glass has something to refract */}
+      <div className="fixed top-[-12%] right-[-8%] w-[560px] h-[560px] bg-primary/20 blur-[130px] rounded-full -z-10 pointer-events-none" />
+      <div className="fixed bottom-[-12%] left-[-8%] w-[460px] h-[460px] bg-tertiary/20 blur-[120px] rounded-full -z-10 pointer-events-none" />
+      <div className="fixed top-[35%] left-[40%] w-[420px] h-[420px] bg-[#5fd3b0]/10 blur-[140px] rounded-full -z-10 pointer-events-none" />
       {/* Film grain */}
       <div className="grain" />
 
       {/* Sidebar — desktop */}
-      <aside className="hidden md:flex flex-col h-screen w-64 fixed left-0 top-0 z-[60] bg-slate-950/70 backdrop-blur-2xl shadow-[10px_0px_30px_rgba(0,0,0,0.5)] p-6">
+      <aside className="liquid-bar hidden md:flex flex-col h-screen w-64 fixed left-0 top-0 z-[60] shadow-[10px_0px_30px_rgba(0,0,0,0.5)] border-r p-6">
         <div className="text-xl font-black text-primary mb-8 font-headline tracking-tight">💰 Budget Planner</div>
         <nav className="flex-1 space-y-1">
           {NAV_ITEMS.map((item, i) => (
             <button key={item.label} onClick={() => setTab(i)}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200 hover:translate-x-1 ${
+              className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-2xl text-sm font-medium transition-all duration-300 ${
                 tab === i
-                  ? "bg-gradient-to-r from-cyan-500/20 to-transparent text-primary border-r-4 border-primary"
-                  : "text-on-surface-variant hover:bg-white/10 hover:text-on-surface"
+                  ? "liquid-pill text-primary"
+                  : "text-on-surface-variant hover:bg-white/5 hover:text-on-surface"
               }`}>
               <span className="material-symbols-outlined text-xl">{item.icon}</span>
               <span>{item.label}</span>
             </button>
           ))}
         </nav>
-        <button onClick={() => setTab(3)}
+        <button onClick={() => setTab(4)}
           className="mt-auto w-full py-3 bg-gradient-to-r from-primary to-primary-container text-on-primary rounded-full font-bold shadow-lg hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-2">
           <span className="material-symbols-outlined text-sm">add</span>
           Add Transaction
@@ -408,7 +560,7 @@ export default function BudgetApp() {
       {/* Main */}
       <main className="md:ml-64 min-h-screen pb-20 md:pb-0">
         {/* Header */}
-        <header className="sticky top-0 z-50 bg-slate-950/60 backdrop-blur-xl shadow-[0px_4px_24px_rgba(5,15,25,0.4)]">
+        <header className="liquid-bar sticky top-0 z-50 border-b shadow-[0px_4px_24px_rgba(5,15,25,0.4)]">
           <div className="flex justify-between items-center px-4 md:px-8 py-4">
             <div>
               <h1 className="text-lg md:text-2xl font-bold bg-gradient-to-r from-primary to-tertiary bg-clip-text text-transparent font-headline tracking-tight">Abyssal Navigator</h1>
@@ -416,7 +568,7 @@ export default function BudgetApp() {
             </div>
             <div className="flex items-center gap-2 md:gap-3">
               <select value={month} onChange={e => setMonth(Number(e.target.value))}
-                className="bg-surface-container border border-outline-variant/30 text-on-surface text-xs rounded-full px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-primary">
+                className="liquid-pill text-on-surface text-xs rounded-full px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-primary">
                 {MONTHS.map((m, i) => <option key={m} value={i}>{m}</option>)}
               </select>
               <button onClick={reset} title="Reset month data"
@@ -446,8 +598,8 @@ export default function BudgetApp() {
               </div>
 
               {/* Hero — editorial, oversized */}
-              <section className="reveal relative rounded-[1.5rem] overflow-hidden ring-1 ring-white/5">
-                <div className="absolute inset-0 bg-gradient-to-br from-surface-container-low via-surface-container-highest to-surface" />
+              <section className="liquid-strong liquid-refract reveal relative rounded-[2rem] overflow-hidden">
+                <div className="absolute inset-0 bg-gradient-to-br from-white/[0.05] via-transparent to-primary/5" />
                 <div className="aurora absolute -top-24 -right-10 w-[420px] h-[420px] rounded-full blur-[90px] opacity-60" />
                 <div className="aurora-2 absolute -bottom-24 -left-10 w-[360px] h-[360px] rounded-full blur-[90px] opacity-50" />
                 {/* Oversized backdrop month name */}
@@ -460,7 +612,7 @@ export default function BudgetApp() {
                       <span className="font-display text-xs font-bold text-primary tabular-nums">00</span>
                       <span className="text-[11px] font-semibold uppercase tracking-[0.28em] text-on-surface-variant">Net Position</span>
                     </div>
-                    <h2 className="font-serif italic text-2xl md:text-3xl text-on-surface-variant/90 leading-none">
+                    <h2 className="gsap-split font-serif italic text-2xl md:text-3xl text-on-surface-variant/90 leading-none">
                       You've kept
                     </h2>
                     <h2 className={`font-display font-bold text-6xl md:text-8xl mt-1 tracking-tight tabular-nums text-glow leading-[0.9] ${netActual >= 0 ? "text-on-surface" : "text-error"}`}>
@@ -513,7 +665,7 @@ export default function BudgetApp() {
                     barCls: "bg-gradient-to-r from-tertiary to-tertiary-container glow-bar-tertiary",
                     p: Math.max(0, pct(netActual, totalIncomeActual)), sub: health },
                 ].map(k => (
-                  <div key={k.label} className="bg-surface-container-low p-6 rounded-2xl relative overflow-hidden group hover:bg-surface-container-high transition-colors ring-1 ring-white/5">
+                  <div key={k.label} className="liquid p-6 rounded-[1.4rem] relative overflow-hidden group hover:-translate-y-0.5 transition-transform duration-300">
                     <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
                       <span className={`material-symbols-outlined text-6xl ${k.color}`}>{k.icon}</span>
                     </div>
@@ -535,7 +687,7 @@ export default function BudgetApp() {
                 <Eyebrow index="02" accent="text-tertiary">Allocation</Eyebrow>
                 <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 md:gap-8">
                 {/* Donut */}
-                <div className="lg:col-span-2 bg-surface-container-lowest p-6 md:p-7 rounded-2xl ring-1 ring-outline-variant/10">
+                <div className="liquid lg:col-span-2 p-6 md:p-7 rounded-[1.4rem]">
                   <h2 className="font-headline text-lg font-bold mb-1">Expense Allocation</h2>
                   <p className="text-xs text-on-surface-variant mb-5">Where your money went this month</p>
                   {donutSegments.length > 0 ? (
@@ -560,7 +712,7 @@ export default function BudgetApp() {
                 </div>
 
                 {/* Spending by category */}
-                <div className="lg:col-span-3 bg-surface-container-lowest p-6 md:p-8 rounded-2xl ring-1 ring-outline-variant/10">
+                <div className="liquid lg:col-span-3 p-6 md:p-8 rounded-[1.4rem]">
                   <h2 className="font-headline text-lg font-bold mb-5">Spending by Category</h2>
                   <div className="space-y-3.5">
                     {Object.entries(sectionTotals).map(([sec, { budgeted, actual }]) => {
@@ -590,7 +742,7 @@ export default function BudgetApp() {
                 <Eyebrow index="03" accent="text-emerald-400">Flow & Rule</Eyebrow>
                 <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 md:gap-8">
                 {/* Cash flow */}
-                <div className="lg:col-span-3 bg-surface-container-lowest p-6 md:p-8 rounded-2xl ring-1 ring-outline-variant/10">
+                <div className="liquid lg:col-span-3 p-6 md:p-8 rounded-[1.4rem]">
                   <div className="flex items-center justify-between mb-6">
                     <div>
                       <h2 className="font-headline text-lg font-bold">Daily Cash Flow</h2>
@@ -625,7 +777,7 @@ export default function BudgetApp() {
                 </div>
 
                 {/* 50/30/20 with progress vs target */}
-                <div className="lg:col-span-2 bg-gradient-to-br from-tertiary/20 to-primary/5 p-6 md:p-7 rounded-2xl border border-white/5">
+                <div className="liquid lg:col-span-2 p-6 md:p-7 rounded-[1.4rem]">
                   <span className="material-symbols-outlined text-tertiary mb-3 block">auto_awesome</span>
                   <h3 className="font-headline text-lg font-bold mb-1">50 / 30 / 20 Rule</h3>
                   <p className="text-xs text-on-surface-variant mb-5">vs your income of {fmt(totalIncomeActual)}</p>
@@ -658,6 +810,48 @@ export default function BudgetApp() {
                 </div>
                 </div>
               </section>
+
+              {/* Recurring subscriptions */}
+              <section className="reveal" style={{ animationDelay: "0.2s" }}>
+                <Eyebrow index="04" accent="text-tertiary">Recurring</Eyebrow>
+                <div className="liquid rounded-[1.4rem] p-6 md:p-8 grid grid-cols-1 lg:grid-cols-5 gap-6">
+                  <div className="lg:col-span-2 flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center gap-2 text-tertiary mb-2">
+                        <span className="material-symbols-outlined">autorenew</span>
+                        <span className="text-xs font-semibold uppercase tracking-wider">Subscriptions</span>
+                      </div>
+                      <p className="text-4xl md:text-5xl font-bold font-display tracking-tight tabular-nums text-tertiary">{fmt(subsMonthly)}<span className="text-base text-on-surface-variant font-normal">/mo</span></p>
+                      <p className="text-sm text-on-surface-variant mt-1">{fmt(subsYearly)} / year · {subs.length} active</p>
+                    </div>
+                    <button onClick={() => setTab(3)}
+                      className="liquid-pill mt-5 self-start rounded-full px-4 py-2 text-sm font-medium flex items-center gap-1.5 hover:-translate-y-0.5 transition-transform">
+                      Manage <span className="material-symbols-outlined text-base">arrow_forward</span>
+                    </button>
+                  </div>
+                  <div className="lg:col-span-3 lg:border-l lg:border-white/10 lg:pl-6">
+                    <p className="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">Upcoming renewals</p>
+                    {subs.length === 0 ? (
+                      <p className="text-sm text-on-surface-variant/60 py-6">No subscriptions tracked yet.</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {subsSorted.slice(0, 4).map(s => {
+                          const d = daysUntil(s.next);
+                          const soon = d !== null && d >= 0 && d <= 3;
+                          return (
+                            <div key={s.id} className="flex items-center gap-3 py-2">
+                              <div className="w-9 h-9 rounded-xl flex items-center justify-center text-base flex-shrink-0" style={{ background: `${s.color}22` }}>{s.emoji}</div>
+                              <span className="flex-1 text-sm font-medium truncate">{s.name}</span>
+                              <span className={`text-xs ${soon ? "text-emerald-400" : "text-on-surface-variant"}`}>{renewLabel(s.next)}</span>
+                              <span className="text-sm font-display font-semibold tabular-nums w-16 text-right" style={{ color: s.color }}>{fmt(monthlyOf(s))}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </section>
             </div>
           )}
 
@@ -668,7 +862,7 @@ export default function BudgetApp() {
               <div className="flex flex-col md:flex-row md:justify-between md:items-end gap-4">
                 <div>
                   <h2 className="font-serif italic text-2xl text-on-surface-variant/90 leading-none">Everything that</h2>
-                  <h2 className="text-4xl md:text-5xl font-bold font-display tracking-tight mt-1">came <span className="text-primary">in</span>.</h2>
+                  <h2 className="gsap-split text-4xl md:text-5xl font-bold font-display tracking-tight mt-1">came <span className="text-primary">in</span>.</h2>
                 </div>
                 <div className="flex gap-px bg-white/5 rounded-xl overflow-hidden ring-1 ring-white/5">
                   <div className="bg-slate-950/40 px-5 py-3">
@@ -681,8 +875,8 @@ export default function BudgetApp() {
                   </div>
                 </div>
               </div>
-              <div className="bg-surface-container-low rounded-xl overflow-hidden ring-1 ring-outline-variant/10">
-                <div className="hidden md:grid grid-cols-[1fr_140px_140px_100px] gap-4 px-6 py-3 bg-surface-container text-xs font-semibold text-on-surface-variant uppercase tracking-wider">
+              <div className="liquid rounded-[1.4rem] overflow-hidden">
+                <div className="hidden md:grid grid-cols-[1fr_140px_140px_100px] gap-4 px-6 py-3 bg-white/5 text-xs font-semibold text-on-surface-variant uppercase tracking-wider">
                   <span>Source</span><span className="text-center">Budgeted {CURRENCY}</span><span className="text-center">Actual {CURRENCY}</span><span className="text-center">% Hit</span>
                 </div>
                 <div className="divide-y divide-outline-variant/10">
@@ -731,7 +925,7 @@ export default function BudgetApp() {
                     );
                   })}
                 </div>
-                <div className="grid grid-cols-[1fr_140px_140px_100px] gap-4 px-6 py-4 bg-surface-container border-t-2 border-primary/30">
+                <div className="grid grid-cols-[1fr_140px_140px_100px] gap-4 px-6 py-4 bg-white/5 border-t-2 border-primary/30">
                   <span className="font-bold text-primary font-headline">TOTAL</span>
                   <span className="text-center font-bold tabular-nums">{fmt(totalIncomeBudget)}</span>
                   <span className="text-center font-bold text-primary tabular-nums">{fmt(totalIncomeActual)}</span>
@@ -749,7 +943,7 @@ export default function BudgetApp() {
                 <div className="flex flex-col md:flex-row md:justify-between md:items-end gap-4">
                   <div>
                     <h2 className="font-serif italic text-2xl text-on-surface-variant/90 leading-none">Everything that</h2>
-                    <h2 className="text-4xl md:text-5xl font-bold font-display tracking-tight mt-1">went <span className="text-error">out</span>.</h2>
+                    <h2 className="gsap-split text-4xl md:text-5xl font-bold font-display tracking-tight mt-1">went <span className="text-error">out</span>.</h2>
                   </div>
                   <div className="flex gap-px bg-white/5 rounded-xl overflow-hidden ring-1 ring-white/5">
                     <div className="bg-slate-950/40 px-5 py-3">
@@ -767,7 +961,7 @@ export default function BudgetApp() {
               {/* Category dials */}
               <section className="reveal" style={{ animationDelay: "0.05s" }}>
                 <Eyebrow index="01" accent="text-primary">Category Dials</Eyebrow>
-                <div className="bg-surface-container-lowest rounded-2xl ring-1 ring-outline-variant/10 p-6 md:p-8">
+                <div className="liquid rounded-[1.4rem] p-6 md:p-8">
                   <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-4 md:gap-3">
                     {Object.entries(EXPENSE_SECTIONS).map(([sec]) => {
                       const { budgeted, actual } = sectionTotals[sec];
@@ -832,13 +1026,152 @@ export default function BudgetApp() {
             </div>
           )}
 
-          {/* ── LOG ── */}
+          {/* ── SUBSCRIPTIONS ── */}
           {tab === 3 && (
+            <div className="space-y-6 md:space-y-8 reveal">
+              <div>
+                <Eyebrow index="◇" accent="text-tertiary">Recurring · Always on</Eyebrow>
+                <div className="flex flex-col md:flex-row md:justify-between md:items-end gap-4">
+                  <div>
+                    <h2 className="font-serif italic text-2xl text-on-surface-variant/90 leading-none">What renews,</h2>
+                    <h2 className="gsap-split text-4xl md:text-5xl font-bold font-display tracking-tight mt-1">every <span className="text-tertiary">month</span>.</h2>
+                  </div>
+                  <div className="flex gap-px bg-white/5 rounded-2xl overflow-hidden ring-1 ring-white/5">
+                    <div className="liquid-pill !rounded-none px-5 py-3">
+                      <p className="text-on-surface-variant text-[10px] uppercase tracking-wider mb-0.5">Per month</p>
+                      <p className="text-xl font-semibold font-display tabular-nums text-tertiary">{fmt(subsMonthly)}</p>
+                    </div>
+                    <div className="liquid-pill !rounded-none px-5 py-3">
+                      <p className="text-on-surface-variant text-[10px] uppercase tracking-wider mb-0.5">Per year</p>
+                      <p className="text-xl font-semibold font-display tabular-nums">{fmt(subsYearly)}</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Summary tiles */}
+              <section className="reveal grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-5">
+                {[
+                  { l: "Monthly Cost", v: fmt(subsMonthly), icon: "autorenew", c: "text-tertiary" },
+                  { l: "Yearly Cost", v: fmt(subsYearly), icon: "calendar_month", c: "text-primary" },
+                  { l: "Active", v: subs.length, icon: "apps", c: "text-on-surface" },
+                  { l: "Next Renewal", v: nextSub ? renewLabel(nextSub.next) : "—", icon: "schedule", c: "text-emerald-400", sub: nextSub?.name },
+                ].map(t => (
+                  <div key={t.l} className="liquid rounded-[1.4rem] p-5 relative overflow-hidden">
+                    <div className="absolute top-0 right-0 p-3 opacity-10"><span className={`material-symbols-outlined text-5xl ${t.c}`}>{t.icon}</span></div>
+                    <span className="text-[11px] font-semibold text-on-surface-variant uppercase tracking-wider">{t.l}</span>
+                    <p className={`mt-3 text-2xl md:text-3xl font-bold font-display tracking-tight tabular-nums ${t.c}`}>{t.v}</p>
+                    {t.sub && <p className="text-xs text-on-surface-variant mt-1 truncate">{t.sub}</p>}
+                  </div>
+                ))}
+              </section>
+
+              {/* Quick add */}
+              <section className="reveal">
+                <Eyebrow index="01" accent="text-primary">Quick Add</Eyebrow>
+                <div className="liquid rounded-[1.4rem] p-5 md:p-6">
+                  <div className="flex flex-wrap gap-2.5">
+                    {SUB_PRESETS.map(p => (
+                      <button key={p.name} onClick={() => addSub({ ...p, next: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10) })}
+                        className="liquid-pill group flex items-center gap-2 rounded-full pl-2 pr-3.5 py-1.5 hover:-translate-y-0.5 transition-transform"
+                        title={`Add ${p.name} · ${fmt(p.amount)}/${p.cycle === "yearly" ? "yr" : "mo"}`}>
+                        <span className="w-6 h-6 rounded-full flex items-center justify-center text-sm" style={{ background: `${p.color}22` }}>{p.emoji}</span>
+                        <span className="text-sm font-medium">{p.name}</span>
+                        <span className="material-symbols-outlined text-base text-on-surface-variant group-hover:text-primary">add</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </section>
+
+              {/* Custom add + list */}
+              <section className="reveal grid grid-cols-1 lg:grid-cols-5 gap-6 md:gap-8">
+                {/* Custom form */}
+                <div className="lg:col-span-2 liquid rounded-[1.4rem] p-6 h-fit">
+                  <h3 className="text-sm font-semibold text-tertiary mb-5 flex items-center gap-2">
+                    <span className="material-symbols-outlined text-base">add_circle</span>Custom Subscription
+                  </h3>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-xs text-on-surface-variant mb-1.5 block font-medium uppercase tracking-wider">Service</label>
+                      <input type="text" placeholder="e.g. Figma" value={subForm.name} onChange={e => setSubForm(p => ({ ...p, name: e.target.value }))} className={inputCls} />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-xs text-on-surface-variant mb-1.5 block font-medium uppercase tracking-wider">Amount ({CURRENCY})</label>
+                        <input type="number" min="0" inputMode="decimal" placeholder="0" value={subForm.amount} onChange={e => setSubForm(p => ({ ...p, amount: e.target.value }))} className={inputCls} />
+                      </div>
+                      <div>
+                        <label className="text-xs text-on-surface-variant mb-1.5 block font-medium uppercase tracking-wider">Billing</label>
+                        <select value={subForm.cycle} onChange={e => setSubForm(p => ({ ...p, cycle: e.target.value }))}
+                          className="w-full bg-surface-container-lowest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary capitalize">
+                          {CYCLES.map(c => <option key={c} value={c} className="capitalize">{c}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-xs text-on-surface-variant mb-1.5 block font-medium uppercase tracking-wider">Next Renewal</label>
+                      <input type="date" value={subForm.next} onChange={e => setSubForm(p => ({ ...p, next: e.target.value }))} className={inputCls} />
+                    </div>
+                    <button onClick={() => addSub()}
+                      className="w-full py-3 bg-gradient-to-r from-tertiary to-tertiary-container text-on-tertiary rounded-full font-bold text-sm tracking-wide hover:scale-[1.01] active:scale-95 transition-all flex items-center justify-center gap-2 shadow-lg">
+                      <span className="material-symbols-outlined text-base">add</span>Add Subscription
+                    </button>
+                  </div>
+                </div>
+
+                {/* List */}
+                <div className="lg:col-span-3">
+                  <Eyebrow index="02" accent="text-tertiary">Your Stack · {subs.length}</Eyebrow>
+                  {subs.length === 0 ? (
+                    <div className="liquid rounded-[1.4rem] py-16 text-center">
+                      <span className="material-symbols-outlined text-5xl text-on-surface-variant/30 block mb-3">autorenew</span>
+                      <p className="text-on-surface-variant text-sm">No subscriptions yet. Add one from the presets above.</p>
+                    </div>
+                  ) : (
+                    <div className="liquid rounded-[1.4rem] overflow-hidden divide-y divide-white/5">
+                      {subsSorted.map(s => {
+                        const d = daysUntil(s.next);
+                        const soon = d !== null && d >= 0 && d <= 3;
+                        const overdue = d !== null && d < 0;
+                        return (
+                          <div key={s.id} className="flex items-center gap-3.5 p-4 hover:bg-white/[0.03] transition-colors"
+                            style={{ borderLeft: `3px solid ${s.color}` }}>
+                            <div className="w-11 h-11 rounded-2xl flex items-center justify-center text-xl flex-shrink-0" style={{ background: `${s.color}22` }}>{s.emoji}</div>
+                            <div className="min-w-0 flex-1">
+                              <p className="font-semibold text-sm truncate">{s.name}</p>
+                              <p className="text-xs text-on-surface-variant">
+                                {fmt(s.amount)}/<span className="capitalize">{s.cycle === "yearly" ? "yr" : s.cycle === "weekly" ? "wk" : "mo"}</span>
+                                {s.cycle !== "monthly" && <span className="text-on-surface-variant/60"> · {fmt(monthlyOf(s))}/mo</span>}
+                              </p>
+                            </div>
+                            <div className="text-right flex-shrink-0">
+                              <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${overdue ? "text-error bg-error/10" : soon ? "text-emerald-400 bg-emerald-400/10" : "text-on-surface-variant bg-white/5"}`}>
+                                {renewLabel(s.next)}
+                              </span>
+                              <p className="font-semibold font-display tabular-nums mt-1" style={{ color: s.color }}>{fmt(monthlyOf(s))}<span className="text-[10px] text-on-surface-variant">/mo</span></p>
+                            </div>
+                            <button onClick={() => deleteSub(s.id)}
+                              className="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-error/10 hover:text-error transition-all flex-shrink-0">
+                              <span className="material-symbols-outlined text-base">delete</span>
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </section>
+            </div>
+          )}
+
+          {/* ── LOG ── */}
+          {tab === 4 && (
             <div className="space-y-6 reveal">
               <div>
                 <Eyebrow index="◇" accent="text-tertiary">Activity</Eyebrow>
                 <h2 className="font-serif italic text-2xl text-on-surface-variant/90 leading-none">Your money,</h2>
-                <h2 className="text-4xl md:text-5xl font-bold font-display tracking-tight mt-1">in <span className="text-tertiary">motion</span>.</h2>
+                <h2 className="gsap-split text-4xl md:text-5xl font-bold font-display tracking-tight mt-1">in <span className="text-tertiary">motion</span>.</h2>
               </div>
               {/* Form */}
               <div className="glass-card rounded-xl p-6 border border-outline-variant/10">
@@ -895,7 +1228,7 @@ export default function BudgetApp() {
               <div>
                 <Eyebrow index="01" accent="text-primary">Recent Flux</Eyebrow>
                 {log.length === 0 ? (
-                  <div className="bg-surface-container-low rounded-2xl ring-1 ring-outline-variant/5 py-16 text-center">
+                  <div className="liquid rounded-[1.4rem] py-16 text-center">
                     <span className="material-symbols-outlined text-5xl text-on-surface-variant/30 block mb-3">receipt_long</span>
                     <p className="text-on-surface-variant text-sm">No transactions yet. Add your first one above.</p>
                   </div>
@@ -913,7 +1246,7 @@ export default function BudgetApp() {
                           </div>
                         </div>
                         {/* Entries */}
-                        <div className="bg-surface-container-low rounded-2xl ring-1 ring-outline-variant/5 overflow-hidden divide-y divide-outline-variant/5">
+                        <div className="liquid rounded-[1.4rem] overflow-hidden divide-y divide-white/5">
                           {day.entries.map(entry => (
                             <div key={entry.id}
                               className={`flex items-center justify-between p-4 hover:bg-surface-container-high transition-colors ${pulse === entry.id ? "animate-[fadeIn_0.4s_ease]" : ""}`}
@@ -952,11 +1285,11 @@ export default function BudgetApp() {
       </main>
 
       {/* Bottom nav — mobile only */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-[60] bg-slate-950/80 backdrop-blur-xl border-t border-outline-variant/20">
-        <div className="flex">
+      <nav className="liquid-bar md:hidden fixed bottom-0 left-0 right-0 z-[60] border-t">
+        <div className="flex px-1.5 py-1.5">
           {NAV_ITEMS.map((item, i) => (
             <button key={item.label} onClick={() => setTab(i)}
-              className={`flex-1 flex flex-col items-center gap-1 py-3 text-[10px] font-medium transition-all ${tab === i ? "text-primary" : "text-on-surface-variant"}`}>
+              className={`flex-1 flex flex-col items-center gap-0.5 py-2 rounded-2xl text-[10px] font-medium transition-all duration-300 ${tab === i ? "liquid-pill text-primary" : "text-on-surface-variant active:scale-95"}`}>
               <span className="material-symbols-outlined text-xl">{item.icon}</span>
               <span>{item.label}</span>
             </button>
